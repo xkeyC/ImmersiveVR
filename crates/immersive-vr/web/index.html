@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ImmersiveVR</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0e0f12">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="js/main.js"></script>
+</head>
+<body>
+<div id="start">
+  <h1>ImmersiveVR</h1>
+  <div class="buttons">
+    <button id="enter" disabled>进入 VR</button>
+    <button id="passthrough" class="secondary toggle" hidden>透视：关</button>
+    <button id="preview" class="secondary">预览</button>
+  </div>
+  <div id="status">连接中…</div>
+</div>
+<canvas id="view"></canvas>
+<button id="exit-preview" class="secondary">退出预览</button>
+<div id="hint">左眼 | 右眼并排预览 · 鼠标点击操作面板 · M 键开关面板 · Esc 退出</div>
+</body>
+</html>

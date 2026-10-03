@@ -1,0 +1,23 @@
+[package]
+name = "depth-infer"
+description = "Monocular depth (Depth-Anything-V2-Small) on ONNX Runtime with TensorRT/CUDA/DirectML/CPU fallback"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["cuda", "tensorrt"]
+cuda = ["ort/cuda"]
+tensorrt = ["ort/tensorrt"]
+directml = ["ort/directml"]
+
+[dependencies]
+ort = { workspace = true, features = ["std", "tracing", "load-dynamic", "api-24"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+clap.workspace = true
+image.workspace = true
+tracing-subscriber.workspace = true

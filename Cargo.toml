@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# ONNX Runtime 1.30 is loaded at run time (`load-dynamic`); see scripts/fetch_onnxruntime.py.
+# rc.13 bug (fixed upstream, not yet released): `MemoryInfo::to_owned` always
+# returns a CPU MemoryInfo, so `TensorRefMut::from_raw` over CUDA memory makes
+# ORT read device pointers as host memory (segfault; `Allocator::memory_info`
+# reports CPU too). depth-infer avoids both: device buffers are ORT-allocated
+# tensors and the output is read from the value `run_binding` returns. Wrapping
+# a raw CUDA pointer (capture interop) must go through the C API with the real
+# MemoryInfo, as local-multimodal-infra `wrap_memory` (a183eb4) does. The
+# `cuda_graph_tracks_new_frames` real-model test covers the CUDA graph path.
+ort = { version = "=2.0.0-rc.13", default-features = false }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+clap = { version = "4", features = ["derive"] }
+
+depth-infer = { path = "crates/depth-infer" }
+
+[profile.release]
+debug = "line-tables-only"
