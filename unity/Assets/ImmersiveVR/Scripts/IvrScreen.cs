@@ -48,7 +48,7 @@ namespace ImmersiveVR
         /// Placed again in front of the viewer (the panel follows).
         public event Action Recentered;
         /// Why there is no picture (starting, failed), or null.
-        public string Problem { get; private set; } = "启动中：加载模型…";
+        public string Problem { get; private set; } = Lang.T("启动中：加载模型…", "Starting: loading the models…");
         /// New pictures per second from the pipeline, and their size.
         public float PicturesPerSecond { get; private set; }
         public Vector2Int PictureSize { get; private set; }
@@ -133,7 +133,7 @@ namespace ImmersiveVR
         void Fail(string message)
         {
             failed = true;
-            Problem = "出错：" + message;
+            Problem = Lang.T("出错：", "Error: ") + message;
         }
 
         /// ivr_init's JSON: models and runtime paths, capture and 3D settings.
@@ -176,11 +176,9 @@ namespace ImmersiveVR
                     else if (line.StartsWith("lib=")) libs.Add(line.Substring(4).Trim());
                 }
             }
-            else
-            {
-                var bundled = Path.Combine(Root, "runtime", "ort", "onnxruntime.dll");
-                if (File.Exists(bundled)) ort = bundled;
-            }
+            // The release's runtime package (runtime.txt may only add TensorRT).
+            var bundled = Path.Combine(Root, "runtime", "ort", "onnxruntime.dll");
+            if (ort == null && File.Exists(bundled)) ort = bundled;
             return (ort, libs);
         }
 
@@ -200,7 +198,7 @@ namespace ImmersiveVR
                 deviceProbe.Apply();
                 IvrNative.Attach(deviceProbe);
                 ready = true;
-                Problem = "等待画面…";
+                Problem = Lang.T("等待画面…", "Waiting for the picture…");
             }
 
             // Copies the newest pair into the eye textures on the render thread.
@@ -209,7 +207,7 @@ namespace ImmersiveVR
             if (info.running == 0)
             {
                 var error = IvrNative.LastError();
-                Fail("管线停止：" + error);
+                Fail(Lang.T("管线停止：", "the pipeline stopped: ") + error);
                 Debug.LogError($"[ImmersiveVR] pipeline stopped: {error}");
                 return;
             }

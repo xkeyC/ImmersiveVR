@@ -14,7 +14,7 @@
 
 import { playPacket } from "./audio.js";
 import { settings, setSettings, SERVER_KEYS } from "./settings.js";
-import { setStatus } from "./ui.js";
+import { setStatus, t } from "./ui.js";
 
 export const CODEC_LABELS = { hevc: "H.265", av1: "AV1" };
 
@@ -139,7 +139,7 @@ export function connect() {
       else configure(message);
     }
   };
-  ws.onclose = () => { setStatus("连接断开，2 秒后重连"); setTimeout(connect, 2000); };
+  ws.onclose = () => { setStatus(t("连接断开，2 秒后重连", "Disconnected; reconnecting in 2 s")); setTimeout(connect, 2000); };
 }
 
 async function configure(info) {
@@ -148,7 +148,8 @@ async function configure(info) {
   if (decoder && decoder.state !== "closed") decoder.close();
   decoder = null;
   if (!("VideoDecoder" in window)) {
-    stream.problem = "WebCodecs 不可用：请用 https 地址打开（或 http://localhost）";
+    stream.problem = t("WebCodecs 不可用：请用 https 地址打开（或 http://localhost）",
+      "WebCodecs is unavailable: open the https address (or http://localhost)");
     setStatus(stream.problem);
     return;
   }
@@ -165,10 +166,11 @@ async function configure(info) {
     const other = info.codec === "hevc" ? "av1" : "hevc";
     if (!triedCodecs.has(other)) {
       triedCodecs.add(info.codec);
-      stream.problem = `此设备无法解码 ${CODEC_LABELS[info.codec]}，已切换到 ${CODEC_LABELS[other]}`;
+      stream.problem = t(`此设备无法解码 ${CODEC_LABELS[info.codec]}，已切换到 ${CODEC_LABELS[other]}`,
+        `This device cannot decode ${CODEC_LABELS[info.codec]}; switched to ${CODEC_LABELS[other]}`);
       setSettings({ codec: other });
     } else {
-      stream.problem = `此设备无法解码 ${info.codec_string}`;
+      stream.problem = t(`此设备无法解码 ${info.codec_string}`, `This device cannot decode ${info.codec_string}`);
     }
     setStatus(stream.problem);
     return;
@@ -183,7 +185,7 @@ async function configure(info) {
       frameMeta.delete(frame.timestamp);
       stats.decoded++;
     },
-    error: (error) => { setStatus("解码错误: " + error.message); configure(stream.info); askKeyframe(); },
+    error: (error) => { setStatus(t("解码错误：", "Decode error: ") + error.message); configure(stream.info); askKeyframe(); },
   });
   decoder.configure(config);
   waitingForKey = true;
@@ -240,7 +242,8 @@ setInterval(() => {
     const { received, shown, rtt } = stream.latency;
     stream.summary = `${info.layout.left.width}×${info.layout.left.height} ${CODEC_LABELS[info.codec]} · ` +
       `${(stats.decoded / seconds).toFixed(0)} fps · ${(stats.bytes * 8 / seconds / 1e6).toFixed(1)} Mbps · ` +
-      `延迟 收 ${ms(received)} / 显 ${ms(shown)} ms（往返 ${ms(rtt)}）`;
+      t(`延迟 收 ${ms(received)} / 显 ${ms(shown)} ms（往返 ${ms(rtt)}）`,
+        `latency recv ${ms(received)} / shown ${ms(shown)} ms (rtt ${ms(rtt)})`);
     setStatus(stream.summary);
   }
   Object.assign(stats, { received: 0, decoded: 0, bytes: 0, since: performance.now(), receivedLatency: [], shownLatency: [] });

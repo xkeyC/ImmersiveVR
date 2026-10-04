@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-ImmersiveVR turns your Windows desktop into stereoscopic 3D in real time and streams it to a VR headset such as a Meta Quest. You watch it in the headset's browser, so there is nothing to install on the headset.
+ImmersiveVR is a **high-performance** real-time 2D-to-3D converter. It turns your Windows desktop into stereoscopic 3D in real time and streams it to a VR headset such as a Meta Quest. You watch it in the headset's browser, so there is nothing to install on the headset. Capture, depth estimation, stereo generation and encoding all run on the GPU: at 1440p and at 4K every frame is newly converted at 60 fps, about 8–10 ms from capture to encoded frame (measured on an RTX 4090, see [Performance](#performance)).
 
 The PC captures the screen and estimates depth for every pixel. It then renders both eyes with [iw3](https://github.com/nagadomi/nunif)'s mlbw_l2 network and encodes them with NVENC straight from GPU memory. The stream travels over your LAN to the headset. There the browser decodes it in hardware with WebCodecs and shows it as an adjustable, curved virtual screen through WebXR compositor layers.
 
@@ -11,7 +11,7 @@ There is also a [PCVR client](#pcvr-client) (Unity + OpenXR). It draws the same 
 ## Features
 
 - **Real-time 2D to 3D.** Depth-Anything-V2-Small depth plus iw3 mlbw_l2 stereo, computed for every frame. Object outlines stay clean, with no ghosting.
-- **Entirely on the GPU.** Capture (D3D11 to CUDA), scaling, the depth and stereo models (TensorRT), the eye rendering (a CUDA kernel) and encoding (NVENC) all stay in GPU memory. At 1440p every frame is new at 60 fps, using about half the GPU.
+- **High performance, entirely on the GPU.** Capture (D3D11 to CUDA), scaling, the depth and stereo models (TensorRT), the eye rendering (a CUDA kernel) and encoding (NVENC) all stay in GPU memory. At 1440p every frame is new at 60 fps, using about half the GPU.
 - **Low latency.**
   - Encoder settings follow [Sunshine](https://github.com/LizardByte/Sunshine). Every frame fits within a frame time of the link, and keyframes are sent only on demand, so there are no periodic bursts.
   - The server drops frames to catch up when a client falls behind.
@@ -37,27 +37,37 @@ There is also a [PCVR client](#pcvr-client) (Unity + OpenXR). It draws the same 
 
 ### 1. Download
 
-Download the v0.0.1 packages from [Releases](../../releases):
+The programs, the models and the runtime libraries are published as three Releases. Download what you need and **extract everything into the same folder**:
 
-| File | Contents |
-|---|---|
-| `ImmersiveVR-v0.0.1-windows-x64.zip` | `immersive-vr.exe`, ONNX Runtime (CUDA 12 build) and the CUDA / cuDNN runtime libraries it needs |
-| `ImmersiveVR-models-v0.0.1.zip` | Models: `models/depth/` (Depth-Anything-V2-Small, 770×434) and `models/stereo/` (iw3 mlbw_l2, three strength levels) |
-| `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` | Optional: the [PCVR client](#pcvr-client) `ImmersiveVR.exe`, which shares the runtime libraries and models |
+| Release | File | Contents | Needed |
+|---|---|---|---|
+| [Programs v0.0.1](../../releases/tag/v0.0.1) | `ImmersiveVR-v0.0.1-windows-x64.zip` | `immersive-vr.exe` (web streaming) and `ImmersiveVR.exe` (PCVR client) | Yes |
+| [Models models-v0.0.1](../../releases/tag/models-v0.0.1) | `ImmersiveVR-models-v0.0.1.zip` | `models/depth/` (Depth-Anything-V2-Small, 770×434), `models/stereo/` (iw3 mlbw_l2, three strength levels) | Yes |
+| [Runtime runtime-v0.0.1](../../releases/tag/runtime-v0.0.1) | `ImmersiveVR-runtime-v0.0.1-windows-x64.zip` | `runtime/ort/`: ONNX Runtime 1.30 (CUDA 12 build), CUDA 12, cuDNN 9 | Yes |
+| | `ImmersiveVR-runtime-tensorrt-v0.0.1-windows-x64.zip` | `runtime/ort/`: TensorRT 10 (RTX 20 / 30 / 40 / 50 series) | Recommended |
 
-Extract them all into **the same folder**:
+The TensorRT package is optional. Without it the models run on CUDA and still reach 60 fps; with it they run about 2× faster and leave the GPU more headroom. On first start TensorRT builds engines for your GPU, which takes a few minutes; later starts load them from a cache under `models/`.
+
+The models and the runtime rarely change, so upgrades usually only need the programs package.
+
+The folder afterwards:
 
 ```
 ImmersiveVR/
-├─ immersive-vr.exe       the web streaming server
-├─ ImmersiveVR.exe        the PCVR client (optional, with ImmersiveVR_Data/ etc.)
-├─ runtime/ort/…          ONNX Runtime and runtime libraries
+├─ immersive-vr.exe       web streaming mode
+├─ ImmersiveVR.exe        PCVR mode (with ImmersiveVR_Data/ and the other player files)
+├─ runtime/ort/…          ONNX Runtime, CUDA, cuDNN (and the optional TensorRT)
 └─ models/
    ├─ depth/…
    └─ stereo/…
 ```
 
-Optional: for faster depth and stereo models (about 2×), get [TensorRT 10](https://developer.nvidia.com/tensorrt) (CUDA 12 build) and add `lib=<TensorRT bin or lib directory>` to `runtime/runtime.txt`. The first start builds the engines, which takes a few minutes; later starts load them from a cache. Without TensorRT it falls back to CUDA.
+Pick one of the two modes:
+
+| Mode | Start | Headset | Best for |
+|---|---|---|---|
+| **Web streaming** | `immersive-vr.exe` | Open the page in the Quest browser, nothing to install | Standalone headsets over Wi-Fi; sections 2–6 below |
+| **PCVR** | `ImmersiveVR.exe` | Through a PC VR runtime (SteamVR, Pimax Play, Virtual Desktop, Quest Link, …) | PCVR headsets or a Quest connected to the PC; no video encoding; see [PCVR client](#pcvr-client) |
 
 ### 2. Start
 
@@ -122,7 +132,7 @@ The most useful options are below; run `immersive-vr.exe --help` for the full li
 
 `ImmersiveVR.exe` shows the 3D desktop through a PC VR runtime (OpenXR). The conversion is the same as the web version's, but both eye images go straight from GPU memory into the VR scene: no video encoding and no browser. It suits PCVR headsets such as Pimax or Index, and Quests connected through Virtual Desktop, Steam Link or Quest Link.
 
-1. Extract `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` into the main package's folder (it shares `runtime/` and `models/`).
+1. Get the programs, models and runtime as described in [Download](#1-download) (the PCVR client `ImmersiveVR.exe` is in the programs package).
 2. Start your headset's PC software and make it the system's OpenXR runtime (SteamVR, Pimax Play, Virtual Desktop and Meta Quest Link each have a setting for it).
 3. Double-click `ImmersiveVR.exe`. It opens a small window on the PC and keeps running without focus. The screen appears in front of you, and again whenever you put the headset back on.
 4. The panel works like the web one: grip toggles it, the trigger clicks. It sets the picture resolution (native by default: 2160p on a 4K monitor), 3D strength, convergence, screen distance / width / curvature / height, and **sharpness** (when the screen is shown smaller than the picture, sharper is clearer; too sharp shimmers). Settings are saved.
@@ -248,9 +258,19 @@ IVR_DEPTH_MODEL_DIR=models/depth IVR_STEREO_MODEL_DIR=models/stereo ORT_DYLIB_PA
 1. Build the native library: `cargo build --release -p ivr-native` (`target/release/ivr_native.dll`, the pipeline behind a C API).
 2. Open `unity/` in Unity 6.6 (6000.6.4f1); the scene is `Assets/ImmersiveVR/Scenes/Desktop3D`.
 3. Press Play to run it in the headset. Each Play loads a copy of `ivr_native.dll` and unloads it afterwards, so Rust rebuilds need no editor restart. **ImmersiveVR → Play Mode Runtime** picks the OpenXR runtime for Play mode (kept across editor restarts).
-4. **ImmersiveVR → Build Release** makes the release: the app in `target/unity/ImmersiveVR/`, the zip in `target/dist/`.
+4. **ImmersiveVR → Build Release** builds the release player into `target/unity/ImmersiveVR/`.
 
 `cargo test --release -p ivr-native` runs the whole pipeline the way Unity loads it (restricted DLL search, repeated load and unload).
+
+### Packaging a release
+
+```bash
+cargo build --release -p immersive-vr -p ivr-native
+# Unity: ImmersiveVR > Build Release
+python scripts/package_release.py --version 0.0.1
+```
+
+This writes the four zips of the [Download](#1-download) table to `target/dist/`. The runtime libraries are collected in the directory order of `runtime/runtime.txt`, the same rule the programs load them by; `--only programs,models,runtime,tensorrt` packs a subset.
 
 Development tools:
 - `--synthetic` streams a moving test pattern instead of the screen, for throughput measurements.

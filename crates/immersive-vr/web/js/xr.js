@@ -11,7 +11,7 @@ import { anchor, drawScreen } from "./screen.js";
 import { setSettings, settings } from "./settings.js";
 import { startAudio } from "./audio.js";
 import { stream } from "./stream.js";
-import { $, app, showStart } from "./ui.js";
+import { $, app, showStart, t } from "./ui.js";
 
 let session = null;
 let space = null;
@@ -25,7 +25,9 @@ export const inSession = () => session !== null;
 /** Checks what the browser supports and enables the start button. */
 export async function setupXR() {
   if (!navigator.xr) {
-    $("enter").textContent = window.isSecureContext ? "此浏览器不支持 WebXR" : "WebXR 不可用（请用 https 地址打开）";
+    $("enter").textContent = window.isSecureContext
+      ? t("此浏览器不支持 WebXR", "This browser has no WebXR")
+      : t("WebXR 不可用（请用 https 地址打开）", "WebXR is unavailable (open the https address)");
     return;
   }
   const [vr, ar] = await Promise.all([
@@ -34,7 +36,7 @@ export async function setupXR() {
   ]);
   app.arSupported = ar;
   markPanelDirty();
-  if (!vr && !ar) { $("enter").textContent = "此设备不支持沉浸式 WebXR"; return; }
+  if (!vr && !ar) { $("enter").textContent = t("此设备不支持沉浸式 WebXR", "This device has no immersive WebXR"); return; }
   $("enter").disabled = false;
   // Passthrough on or off before entering, beside the button (also in the panel).
   $("passthrough").hidden = !ar;
@@ -50,9 +52,9 @@ export async function setupXR() {
 }
 
 export function updateEnterLabel() {
-  if (!$("enter").disabled) $("enter").textContent = "进入 VR";
+  if (!$("enter").disabled) $("enter").textContent = t("进入 VR", "Enter VR");
   const toggle = $("passthrough");
-  toggle.textContent = settings.passthrough ? "透视：开" : "透视：关";
+  toggle.textContent = settings.passthrough ? t("透视：开", "Passthrough: on") : t("透视：关", "Passthrough: off");
   toggle.classList.toggle("on", settings.passthrough);
 }
 
@@ -115,7 +117,8 @@ async function startXR(mode) {
     $("start").style.display = "none";
     next.requestAnimationFrame(frame);
   } catch (error) {
-    showStart(`无法进入 XR：${error.message}（可在开始界面重新点击「进入 VR」）`);
+    showStart(t(`无法进入 XR：${error.message}（可在开始界面重新点击「进入 VR」）`,
+      `Cannot enter XR: ${error.message} (press "Enter VR" on the start screen to try again)`));
   }
 }
 

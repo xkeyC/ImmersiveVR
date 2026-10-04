@@ -14,6 +14,7 @@ import { rotateY } from "./math.js";
 import { anchor, drawEyePicture, geometryVersion, screenGeometry } from "./screen.js";
 import { settings } from "./settings.js";
 import { stream } from "./stream.js";
+import { t } from "./ui.js";
 
 /**
  * Makes `sub`'s image the framebuffer's color target: its slice of a texture
@@ -37,12 +38,12 @@ function attach(sub, array) {
   return status;
 }
 
-/** How the eye images are stored, for the diagnostics line, e.g. "texture-array 2560×1440 L0@0,0 R1@0,0 同纹理". */
+/** How the eye images are stored, for the diagnostics line, e.g. "texture-array 2560×1440 L0@0,0 R1@0,0 shared". */
 function describe(textureType, subs) {
   const { width, height } = subs[0].sub.viewport;
   const eyes = subs.map(({ eye, sub, status }) => `${eye[0].toUpperCase()}${sub.imageIndex ?? "-"}@${sub.viewport.x},${sub.viewport.y}` +
     (status === gl.FRAMEBUFFER_COMPLETE ? "" : ` FB 0x${status.toString(16)}`));
-  const shared = subs[0].sub.colorTexture === subs[1].sub.colorTexture ? "同纹理" : "分纹理";
+  const shared = subs[0].sub.colorTexture === subs[1].sub.colorTexture ? t("同纹理", "shared") : t("分纹理", "separate");
   return `${textureType} ${width}×${height} ${eyes.join(" ")} ${shared}`;
 }
 

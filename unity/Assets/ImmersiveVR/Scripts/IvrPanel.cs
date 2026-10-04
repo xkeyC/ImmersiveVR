@@ -51,13 +51,13 @@ namespace ImmersiveVR
 
         static readonly Stepper[] Steppers =
         {
-            new Stepper { label = "立体强度", step = 0.1f, min = 0, max = 10, get = s => s.divergence, set = (s, v) => s.divergence = v, format = v => $"{v:0.0} %" },
-            new Stepper { label = "会聚（出屏 ↔ 入屏）", step = 0.05f, min = 0, max = 1, get = s => s.convergence, set = (s, v) => s.convergence = v, format = v => $"{v:0.00}" },
-            new Stepper { label = "屏幕距离", step = 0.25f, min = 0.75f, max = 8, get = s => s.distance, set = (s, v) => s.distance = v, format = v => $"{v:0.00} m" },
-            new Stepper { label = "屏幕宽度", step = 0.2f, min = 0.6f, max = 8, get = s => s.width, set = (s, v) => s.width = v, format = v => $"{v:0.0} m" },
-            new Stepper { label = "曲率", step = 0.1f, min = 0, max = 1, get = s => s.curvature, set = (s, v) => s.curvature = v, format = v => v < 0.01f ? "平面" : $"{v:0.0}" },
-            new Stepper { label = "高度", step = 0.1f, min = -1.5f, max = 1.5f, get = s => s.height, set = (s, v) => s.height = v, format = v => $"{(v >= 0 ? "+" : "")}{v:0.0} m" },
-            new Stepper { label = "锐度", step = 0.1f, min = 0, max = 1, get = s => s.sharpness, set = (s, v) => s.sharpness = v, format = v => $"{v:0.0}" },
+            new Stepper { label = Lang.T("立体强度", "3D strength"), step = 0.1f, min = 0, max = 10, get = s => s.divergence, set = (s, v) => s.divergence = v, format = v => $"{v:0.0} %" },
+            new Stepper { label = Lang.T("会聚（出屏 ↔ 入屏）", "Convergence"), step = 0.05f, min = 0, max = 1, get = s => s.convergence, set = (s, v) => s.convergence = v, format = v => $"{v:0.00}" },
+            new Stepper { label = Lang.T("屏幕距离", "Distance"), step = 0.25f, min = 0.75f, max = 8, get = s => s.distance, set = (s, v) => s.distance = v, format = v => $"{v:0.00} m" },
+            new Stepper { label = Lang.T("屏幕宽度", "Width"), step = 0.2f, min = 0.6f, max = 8, get = s => s.width, set = (s, v) => s.width = v, format = v => $"{v:0.0} m" },
+            new Stepper { label = Lang.T("曲率", "Curvature"), step = 0.1f, min = 0, max = 1, get = s => s.curvature, set = (s, v) => s.curvature = v, format = v => v < 0.01f ? Lang.T("平面", "Flat") : $"{v:0.0}" },
+            new Stepper { label = Lang.T("高度", "Height"), step = 0.1f, min = -1.5f, max = 1.5f, get = s => s.height, set = (s, v) => s.height = v, format = v => $"{(v >= 0 ? "+" : "")}{v:0.0} m" },
+            new Stepper { label = Lang.T("锐度", "Sharpness"), step = 0.1f, min = 0, max = 1, get = s => s.sharpness, set = (s, v) => s.sharpness = v, format = v => $"{v:0.0}" },
         };
 
         static TMP_FontAsset font;
@@ -126,7 +126,7 @@ namespace ImmersiveVR
             renderFps = Mathf.Lerp(renderFps, 1f / Mathf.Max(Time.unscaledDeltaTime, 1e-4f), 0.05f);
             if (!visible || screen == null) return;
             var size = screen.PictureSize;
-            SetText(status, screen.Problem ?? $"{size.x}×{size.y} · 新画面 {screen.PicturesPerSecond:0} fps",
+            SetText(status, screen.Problem ?? $"{size.x}×{size.y} · {Lang.T("新画面", "new pictures")} {screen.PicturesPerSecond:0} fps",
                 screen.Problem != null ? Warning : Dim);
             SetText(details, Details(), Dimmer);
             foreach (var stepper in Steppers) SetText(stepper.value, stepper.format(stepper.get(screen)), Color.white);
@@ -137,13 +137,13 @@ namespace ImmersiveVR
         string Details()
         {
             var runtime = UnityEngine.XR.OpenXR.OpenXRRuntime.name;
-            var parts = new List<string> { string.IsNullOrEmpty(runtime) ? "无 XR" : runtime };
+            var parts = new List<string> { string.IsNullOrEmpty(runtime) ? Lang.T("无 XR", "no XR") : runtime };
             var displays = new List<UnityEngine.XR.XRDisplaySubsystem>();
             SubsystemManager.GetSubsystems(displays);
-            if (displays.Count > 0 && displays[0].TryGetDisplayRefreshRate(out var hz)) parts.Add($"头显 {hz:0} Hz");
-            parts.Add($"渲染 {renderFps:0} fps");
+            if (displays.Count > 0 && displays[0].TryGetDisplayRefreshRate(out var hz)) parts.Add($"{Lang.T("头显", "headset")} {hz:0} Hz");
+            parts.Add($"{Lang.T("渲染", "rendering")} {renderFps:0} fps");
             if (UnityEngine.XR.XRSettings.enabled)
-                parts.Add($"眼缓冲 {UnityEngine.XR.XRSettings.eyeTextureWidth}×{UnityEngine.XR.XRSettings.eyeTextureHeight}");
+                parts.Add($"{Lang.T("眼缓冲", "eye buffer")} {UnityEngine.XR.XRSettings.eyeTextureWidth}×{UnityEngine.XR.XRSettings.eyeTextureHeight}");
             return string.Join(" · ", parts);
         }
 
@@ -178,7 +178,7 @@ namespace ImmersiveVR
 
             float y = 150;
             const float row = 92;
-            Label(root, "画面分辨率", 48, y + 34, 34, TextColor);
+            Label(root, Lang.T("画面分辨率", "Resolution"), 48, y + 34, 34, TextColor);
             for (var i = 0; i < Resolutions.Length; i++)
             {
                 var height = Resolutions[i];
@@ -200,10 +200,10 @@ namespace ImmersiveVR
                 y += row - 10;
             }
             y += 14;
-            MakeButton(root, "重新居中", 48, y, 220, 72, () => screen.Recenter());
-            MakeButton(root, "隐藏面板", 288, y, 220, 72, () => Show(false));
-            MakeButton(root, "退出 VR", 528, y, 220, 72, Quit);
-            Label(root, "握持键开关面板 · 面板隐藏时按扳机唤出", 48, Pixels.y - 36, 24, Dim);
+            MakeButton(root, Lang.T("重新居中", "Recenter"), 48, y, 220, 72, () => screen.Recenter());
+            MakeButton(root, Lang.T("隐藏面板", "Hide panel"), 288, y, 220, 72, () => Show(false));
+            MakeButton(root, Lang.T("退出 VR", "Exit VR"), 528, y, 220, 72, Quit);
+            Label(root, Lang.T("握持键开关面板 · 面板隐藏时按扳机唤出", "Grip shows or hides the panel · the trigger brings it back"), 48, Pixels.y - 36, 24, Dim);
         }
 
         void Step(Stepper stepper, int direction)
@@ -306,7 +306,7 @@ namespace ImmersiveVR
                 font.name = Path.GetFileNameWithoutExtension(file);
                 return font;
             }
-            Debug.LogWarning("[ImmersiveVR] no CJK system font found; the panel's Chinese will be missing");
+            if (Lang.Zh) Debug.LogWarning("[ImmersiveVR] no CJK system font found; the panel's Chinese will be missing");
             return null;
         }
 

@@ -8,10 +8,12 @@ import { locateButton, startPreview, stopPreview } from "./preview.js";
 import { markScreenDirty } from "./screen.js";
 import { loadSettings, onSettingsChange, SERVER_KEYS, settings } from "./settings.js";
 import { connect, decoderState, onStreamInfo, onSummary, scheduleSend, stream } from "./stream.js";
-import { $, app } from "./ui.js";
+import { $, app, translatePage } from "./ui.js";
 import { endXR, inSession, recenterXR, setupXR, updateEnterLabel } from "./xr.js";
 
 const GEOMETRY = ["size", "curvature", "distance", "height"];
+
+translatePage();
 
 onSettingsChange((changes) => {
   if (Object.keys(changes).some((key) => SERVER_KEYS.includes(key))) scheduleSend();

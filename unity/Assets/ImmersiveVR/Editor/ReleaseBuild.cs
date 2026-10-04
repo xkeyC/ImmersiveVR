@@ -1,13 +1,11 @@
 // The release build of the PCVR client: player settings (the web client's
-// name, icon and colours), a Windows x64 player in target/unity/ImmersiveVR,
-// ivr_native.dll copied in, and a zip in target/dist meant to be unpacked
-// into the main release's folder (it shares runtime/ and models/ there).
-// Menu: ImmersiveVR > Build Release. Build the DLL first:
-//   cargo build --release -p ivr-native
+// name, icon and colours), a Windows x64 player in target/unity/ImmersiveVR
+// with ivr_native.dll copied in. Menu: ImmersiveVR > Build Release. Build
+// the DLL first (cargo build --release -p ivr-native); package afterwards
+// with scripts/package_release.py.
 
 using System;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.Build;
@@ -70,25 +68,18 @@ namespace ImmersiveVR.EditorTools
             var plugins = Path.Combine(folder, "ImmersiveVR_Data", "Plugins", "x86_64");
             Directory.CreateDirectory(plugins);
             File.Copy(library, Path.Combine(plugins, "ivr_native.dll"), true);
-            Package(folder);
+            DropDebugFolders(folder);
             Debug.Log($"[ImmersiveVR] release: {folder} ({report.summary.totalSize / 1048576} MB)");
         }
 
-        /// Drops what must not ship (IL2CPP / Burst debug folders) and zips the
-        /// player, its files at the zip's root.
-        public static void Package(string folder = null)
+        /// Drops what must not ship (IL2CPP / Burst debug folders). The release
+        /// zips come from scripts/package_release.py.
+        public static void DropDebugFolders(string folder = null)
         {
             folder ??= Path.Combine(Repo, "target", "unity", "ImmersiveVR");
             foreach (var debug in Directory.GetDirectories(folder)
                          .Where(d => d.EndsWith("_DoNotShip") || d.Contains("ButDontShipItWithYourGame")))
                 Directory.Delete(debug, true);
-
-            var dist = Path.Combine(Repo, "target", "dist");
-            Directory.CreateDirectory(dist);
-            var zip = Path.Combine(dist, $"ImmersiveVR-PCVR-v{Version}-windows-x64.zip");
-            if (File.Exists(zip)) File.Delete(zip);
-            ZipFile.CreateFromDirectory(folder, zip, System.IO.Compression.CompressionLevel.Optimal, false);
-            Debug.Log($"[ImmersiveVR] packaged {zip} ({new FileInfo(zip).Length / 1048576} MB)");
         }
     }
 }

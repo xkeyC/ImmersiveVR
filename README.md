@@ -2,7 +2,7 @@
 
 中文 | [English](README.en.md)
 
-ImmersiveVR 把 Windows 桌面实时转成立体 3D，串流到 Meta Quest 等 VR 头显，在浏览器里观看。头显上不用装任何应用。
+ImmersiveVR 是一个**高性能**的实时 2D 转 3D 方案：把 Windows 桌面实时转成立体 3D，串流到 Meta Quest 等 VR 头显，在浏览器里观看，头显上不用装任何应用。从采集、深度估计、立体生成到编码全程在显卡上完成，1440p 和 4K 下都能做到每秒 60 帧、每帧都是新算的 3D 画面，采集到编码完成约 8–10 ms（RTX 4090 实测，见[性能](#性能)）。
 
 PC 采集屏幕后估计每个像素的深度，用 [iw3](https://github.com/nagadomi/nunif) 的 mlbw_l2 网络在 PC 上渲染出左右两只眼的画面，再用 NVENC 直接从显存编码，通过局域网发给头显。头显浏览器用 WebCodecs 硬件解码，再通过 WebXR 合成层显示成一块可调的虚拟曲面屏。
 
@@ -11,7 +11,7 @@ PC 采集屏幕后估计每个像素的深度，用 [iw3](https://github.com/nag
 ## 特性
 
 - **实时 2D 转 3D**：Depth-Anything-V2-Small 深度估计 + iw3 mlbw_l2 立体生成，每帧都算。物体轮廓清晰，没有重影。
-- **全程在显卡上**：采集（D3D11 → CUDA）、缩放、深度和立体模型（TensorRT）、左右眼渲染（CUDA 核函数）、编码（NVENC）都在显存里完成。1440p 下每秒 60 帧都是新画面，GPU 占用约一半。
+- **高性能，全程在显卡上**：采集（D3D11 → CUDA）、缩放、深度和立体模型（TensorRT）、左右眼渲染（CUDA 核函数）、编码（NVENC）都在显存里完成。1440p 下每秒 60 帧都是新画面，GPU 占用约一半。
 - **低延迟**：编码参数参考 [Sunshine](https://github.com/LizardByte/Sunshine)，每帧大小控制在一帧时间内能传完，关键帧只在需要时发，不会周期性突发。客户端积压时服务端主动丢帧追上。本机实测采集到上屏约 12–15 ms。
 - **画面平稳**：显示器刷新率再高（例如 4K 240 Hz），也按固定 60 Hz 节拍取最新一帧。头显支持时自动把刷新率设成 120 Hz，每帧显示的时长一致。
 - **声音**：电脑的声音同步传到头显，几乎没有额外延迟。可以选择串流时把电脑扬声器静音（默认开启）。
@@ -32,27 +32,37 @@ PC 采集屏幕后估计每个像素的深度，用 [iw3](https://github.com/nag
 
 ### 1. 下载
 
-在 [Releases](../../releases) 下载 v0.0.1 的两个包：
+程序、模型、运行库分成三个 Release 发布，按需下载后**解压到同一个文件夹**：
 
-| 文件 | 内容 |
-|---|---|
-| `ImmersiveVR-v0.0.1-windows-x64.zip` | 主程序 `immersive-vr.exe`、ONNX Runtime（CUDA 12 版）及其需要的 CUDA / cuDNN 运行库 |
-| `ImmersiveVR-models-v0.0.1.zip` | 模型：`models/depth/`（Depth-Anything-V2-Small，770×434）和 `models/stereo/`（iw3 mlbw_l2 三个强度档） |
-| `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` | 可选，[PCVR 客户端](#pcvr-客户端) `ImmersiveVR.exe`，与主程序共用运行库和模型 |
+| Release | 文件 | 内容 | 需要吗 |
+|---|---|---|---|
+| [程序 v0.0.1](../../releases/tag/v0.0.1) | `ImmersiveVR-v0.0.1-windows-x64.zip` | `immersive-vr.exe`（网页串流）和 `ImmersiveVR.exe`（PCVR 客户端） | 必需 |
+| [模型 models-v0.0.1](../../releases/tag/models-v0.0.1) | `ImmersiveVR-models-v0.0.1.zip` | `models/depth/`（Depth-Anything-V2-Small，770×434）、`models/stereo/`（iw3 mlbw_l2 三个强度档） | 必需 |
+| [运行库 runtime-v0.0.1](../../releases/tag/runtime-v0.0.1) | `ImmersiveVR-runtime-v0.0.1-windows-x64.zip` | `runtime/ort/`：ONNX Runtime 1.30（CUDA 12 版）、CUDA 12、cuDNN 9 | 必需 |
+| | `ImmersiveVR-runtime-tensorrt-v0.0.1-windows-x64.zip` | `runtime/ort/`：TensorRT 10（RTX 20 / 30 / 40 / 50 系列） | 推荐 |
 
-这些包都解压到**同一个文件夹**，目录结构如下：
+TensorRT 包可以不装，不装时自动改用 CUDA，同样能跑满 60 帧；装了以后深度和立体模型快约 2 倍，显卡更轻松。首次启动 TensorRT 要为你的显卡构建引擎，需要几分钟，之后直接读取 `models/` 下的缓存。
+
+模型和运行库很少变化，以后升级通常只需要换程序包。
+
+解压后的目录：
 
 ```
 ImmersiveVR/
-├─ immersive-vr.exe       网页串流版
-├─ ImmersiveVR.exe        PCVR 客户端（可选，连同 ImmersiveVR_Data/ 等）
-├─ runtime/ort/…          ONNX Runtime 与运行库
+├─ immersive-vr.exe       网页串流模式
+├─ ImmersiveVR.exe        PCVR 模式（连同 ImmersiveVR_Data/ 等文件）
+├─ runtime/ort/…          ONNX Runtime、CUDA、cuDNN（和可选的 TensorRT）
 └─ models/
    ├─ depth/…
    └─ stereo/…
 ```
 
-可选：想让深度和立体模型更快（大约快 2 倍），可以另外下载 [TensorRT 10](https://developer.nvidia.com/tensorrt)（CUDA 12 版），在 `runtime/runtime.txt` 里加一行 `lib=<TensorRT 的 bin 或 lib 目录>`。首次启动会构建引擎，需要几分钟，之后直接读取缓存。不装也能用，会自动改用 CUDA。
+两种使用模式，任选其一：
+
+| 模式 | 启动 | 头显 | 适合 |
+|---|---|---|---|
+| **网页串流** | `immersive-vr.exe` | Quest 浏览器打开网页，不用装应用 | 一体机无线使用，见下文第 2–6 节 |
+| **PCVR** | `ImmersiveVR.exe` | 通过 PC 端 VR 运行时（SteamVR、Pimax Play、Virtual Desktop、Quest Link 等） | PCVR 头显或已连电脑的 Quest，画面不经过视频编码，见 [PCVR 客户端](#pcvr-客户端) |
 
 ### 2. 启动
 
@@ -117,7 +127,7 @@ serving on https://192.168.1.20:13256/
 
 `ImmersiveVR.exe` 用 PC 端 VR 运行时（OpenXR）显示 3D 桌面：转换和网页版相同，左右眼画面直接从显存交给 VR 场景，不做视频编码，也不需要浏览器。适合 Pimax、Index 等 PCVR 头显，或者通过 Virtual Desktop、Steam Link、Quest Link 连接电脑的 Quest。
 
-1. 把 `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` 解压到主程序所在的文件夹（共用 `runtime/` 和 `models/`）。
+1. 按[下载](#1-下载)说明准备好程序、模型和运行库（PCVR 客户端 `ImmersiveVR.exe` 就在程序包里）。
 2. 启动头显的 PC 端软件，让它成为系统的 OpenXR 运行时（SteamVR、Pimax Play、Virtual Desktop、Meta Quest Link 都可以在各自的设置里设为默认 OpenXR 运行时）。
 3. 双击 `ImmersiveVR.exe`。电脑上只开一个小窗口，失去焦点也继续运行；屏幕出现在你正前方，每次戴上头显都会重新摆到面前。
 4. 面板和网页版一样：握持键开关，扳机点击。可调画面分辨率（默认原生，4K 屏即 2160p）、立体强度、会聚、屏幕距离 / 宽度 / 曲率 / 高度，以及**锐度**（屏幕在视野里显示得比画面小时，越锐越清楚，过高会闪）。设置自动保存。
@@ -244,9 +254,19 @@ IVR_DEPTH_MODEL_DIR=models/depth IVR_STEREO_MODEL_DIR=models/stereo ORT_DYLIB_PA
 1. 编译原生库：`cargo build --release -p ivr-native`（产物 `target/release/ivr_native.dll`，即整条流水线的 C 接口）。
 2. 用 Unity 6.6（6000.6.4f1）打开 `unity/`，场景是 `Assets/ImmersiveVR/Scenes/Desktop3D`。
 3. 编辑器里按 Play 即可在头显里运行。每次 Play 加载的是 `ivr_native.dll` 的副本，退出 Play 时卸载，所以重新编译 Rust 后不用重启编辑器。菜单 **ImmersiveVR → Play Mode Runtime** 选择 Play 时用哪个 OpenXR 运行时（重启编辑器后保留）。
-4. 菜单 **ImmersiveVR → Build Release** 生成正式版：程序在 `target/unity/ImmersiveVR/`，压缩包在 `target/dist/`。
+4. 菜单 **ImmersiveVR → Build Release** 生成正式版，输出到 `target/unity/ImmersiveVR/`。
 
 `cargo test --release -p ivr-native` 会模拟 Unity 的加载方式（受限的 DLL 搜索路径、反复加载卸载）跑通整条流水线。
+
+### 打包发布
+
+```bash
+cargo build --release -p immersive-vr -p ivr-native
+# Unity：ImmersiveVR → Build Release
+python scripts/package_release.py --version 0.0.1
+```
+
+在 `target/dist/` 生成[下载](#1-下载)表里的四个 zip。运行库按 `runtime/runtime.txt` 的目录顺序收集（和程序加载它们的规则一致）；`--only programs,models,runtime,tensorrt` 可以只打其中几个。
 
 开发工具：
 - `--synthetic` 用一张移动的测试图代替屏幕，用来测吞吐。

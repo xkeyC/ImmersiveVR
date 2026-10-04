@@ -5,6 +5,7 @@
 // Steps: {"wait": seconds} | {"state": label} | {"shot": "file.png"}
 //        | {"click": "<panel action>"}  (a real mouse click on that button in the preview)
 //        | {"reload": true} | {"eval": "<async function body returning a value>"}
+// CHROME_LANG=en-US (or zh-CN) sets the browser's language.
 // Default steps: wait 5 s, print state, screenshot to target/page.png.
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -19,7 +20,9 @@ const browser = spawn(chrome, [
   "--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "ivr-cdp-"))}`,
   // The server's certificate is self-signed; a headset user clicks through the warning instead.
   "--ignore-certificate-errors",
-  "--no-first-run", "--window-size=1600,900", "--autoplay-policy=no-user-gesture-required", "about:blank",
+  "--no-first-run", "--window-size=1600,900", "--autoplay-policy=no-user-gesture-required",
+  ...(process.env.CHROME_LANG ? [`--lang=${process.env.CHROME_LANG}`, `--accept-lang=${process.env.CHROME_LANG}`] : []),
+  "about:blank",
 ], { stdio: "ignore" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

@@ -7,18 +7,18 @@ import { clamp, multiply, rotateY, rotationY, scaling, snap, translation } from 
 import { setSettings, settings } from "./settings.js";
 import { CODEC_LABELS, stream } from "./stream.js";
 import { audio } from "./audio.js";
-import { app } from "./ui.js";
+import { app, t } from "./ui.js";
 
 const PANEL_PX = [1280, 1040];
 const PANEL_M = [0.8, 0.65];
 
 const STEPPERS = [
-  { key: "divergence", label: "立体强度", step: 0.1, min: 0, max: 10, format: (v) => `${v.toFixed(1)} %` },
-  { key: "convergence", label: "会聚（出屏 ↔ 入屏）", step: 0.05, min: 0, max: 1, format: (v) => v.toFixed(2) },
-  { key: "distance", label: "屏幕距离", step: 0.25, min: 0.75, max: 8, format: (v) => `${v.toFixed(2)} m` },
-  { key: "size", label: "屏幕宽度", step: 0.2, min: 0.6, max: 8, format: (v) => `${v.toFixed(1)} m` },
-  { key: "curvature", label: "曲率", step: 0.1, min: 0, max: 1, format: (v) => (v < 0.01 ? "平面" : v.toFixed(1)) },
-  { key: "height", label: "高度", step: 0.1, min: -1.5, max: 1.5, format: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)} m` },
+  { key: "divergence", label: t("立体强度", "3D strength"), step: 0.1, min: 0, max: 10, format: (v) => `${v.toFixed(1)} %` },
+  { key: "convergence", label: t("会聚（出屏 ↔ 入屏）", "Convergence"), step: 0.05, min: 0, max: 1, format: (v) => v.toFixed(2) },
+  { key: "distance", label: t("屏幕距离", "Distance"), step: 0.25, min: 0.75, max: 8, format: (v) => `${v.toFixed(2)} m` },
+  { key: "size", label: t("屏幕宽度", "Width"), step: 0.2, min: 0.6, max: 8, format: (v) => `${v.toFixed(1)} m` },
+  { key: "curvature", label: t("曲率", "Curvature"), step: 0.1, min: 0, max: 1, format: (v) => (v < 0.01 ? t("平面", "Flat") : v.toFixed(1)) },
+  { key: "height", label: t("高度", "Height"), step: 0.1, min: -1.5, max: 1.5, format: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)} m` },
 ];
 
 export const panel = { visible: true, placed: false, position: [0, -0.28, -0.85], yaw: 0, hover: null, buttons: [] };
@@ -92,21 +92,21 @@ function redraw() {
   };
 
   text("ImmersiveVR", 48, 56, 44);
-  text(stream.problem || stream.summary || "等待画面…", 48, 100, 26, stream.problem ? "#ffb35c" : "#8a8f99");
+  text(stream.problem || stream.summary || t("等待画面…", "Waiting for the picture…"), 48, 100, 26, stream.problem ? "#ffb35c" : "#8a8f99");
   // Diagnostics: where a black screen comes from (no frames, no decode, no upload, GL error).
-  const xr = app.inXR ? ` · ${app.layers ? `合成层 ${app.layerInfo}` : "眼缓冲"} · XR ${app.xrFps.toFixed(0)} fps` : "";
-  const sound = audio.bufferedMs === null ? "" : ` · 声音缓冲 ${audio.bufferedMs.toFixed(0)} ms${audio.underruns ? `（断 ${audio.underruns}）` : ""}`;
-  text(`${app.xrMode || "预览"}${app.blendMode && app.inXR ? ` · ${app.blendMode}` : ""}${xr} · 收 ${stream.received.toFixed(0)} / ` +
-    `解码 ${stream.decoded.toFixed(0)} fps · 上传 ${video.uploads}${video.size ? ` (${video.size})` : ""} · ` +
-    `GL ${app.glError ? `0x${app.glError.toString(16)}` : "正常"}${sound}`, 48, 132, 22, "#6f7682");
+  const xr = app.inXR ? ` · ${app.layers ? `${t("合成层", "layers")} ${app.layerInfo}` : t("眼缓冲", "eye buffer")} · XR ${app.xrFps.toFixed(0)} fps` : "";
+  const sound = audio.bufferedMs === null ? "" : ` · ${t("声音缓冲", "audio buffer")} ${audio.bufferedMs.toFixed(0)} ms${audio.underruns ? t(`（断 ${audio.underruns}）`, ` (${audio.underruns} gaps)`) : ""}`;
+  text(`${app.xrMode || t("预览", "preview")}${app.blendMode && app.inXR ? ` · ${app.blendMode}` : ""}${xr} · ${t("收", "recv")} ${stream.received.toFixed(0)} / ` +
+    `${t("解码", "decoded")} ${stream.decoded.toFixed(0)} fps · ${t("上传", "uploads")} ${video.uploads}${video.size ? ` (${video.size})` : ""} · ` +
+    `GL ${app.glError ? `0x${app.glError.toString(16)}` : t("正常", "ok")}${sound}`, 48, 132, 22, "#6f7682");
 
   let y = 150;
   const row = 92;
-  text("传输分辨率", 48, y + 34);
+  text(t("传输分辨率", "Resolution"), 48, y + 34);
   const resolutions = stream.info ? stream.info.resolutions : [1080, 1440, 2160];
   resolutions.forEach((h, i) => button(`${h}p`, 380 + i * 190, y, 170, 68, `resolution:${h}`, settings.resolution === h));
   y += row;
-  text("编码", 48, y + 34);
+  text(t("编码", "Codec"), 48, y + 34);
   ["hevc", "av1"].forEach((c, i) => button(CODEC_LABELS[c], 380 + i * 190, y, 170, 68, `codec:${c}`, settings.codec === c));
   y += row;
   for (const s of STEPPERS) {
@@ -118,17 +118,17 @@ function redraw() {
   }
   // Passthrough (chosen on the start screen): how much of the room shows.
   if (app.xrMode === "immersive-ar") {
-    text("背景透明度", 48, y + 34);
+    text(t("背景透明度", "Background"), 48, y + 34);
     slider("background", 380, y + 14, 520, 40);
     text(`${Math.round(settings.background * 100)} %`, 1010, y + 34, 34, "#fff", "center");
     y += row - 10;
   }
   y += 14;
-  button("重新居中", 48, y, 220, 72, "recenter");
-  button("隐藏面板", 288, y, 220, 72, "hide");
-  button(app.inXR ? "退出 VR" : "退出预览", 528, y, 220, 72, "exit");
-  button(settings.mute_pc ? "电脑静音：开" : "电脑静音：关", 768, y, 260, 72, "mutepc", settings.mute_pc);
-  text("握持键开关面板 · 面板隐藏时按扳机/捏合唤出", 48, H - 36, 24, "#8a8f99");
+  button(t("重新居中", "Recenter"), 48, y, 220, 72, "recenter");
+  button(t("隐藏面板", "Hide panel"), 288, y, 220, 72, "hide");
+  button(app.inXR ? t("退出 VR", "Exit VR") : t("退出预览", "Exit preview"), 528, y, 220, 72, "exit");
+  button(settings.mute_pc ? t("电脑静音：开", "PC mute: on") : t("电脑静音：关", "PC mute: off"), 768, y, 260, 72, "mutepc", settings.mute_pc);
+  text(t("握持键开关面板 · 面板隐藏时按扳机/捏合唤出", "Grip shows or hides the panel · trigger / pinch brings it back"), 48, H - 36, 24, "#8a8f99");
   panel.buttons = buttons;
 
   gl.bindTexture(gl.TEXTURE_2D, panelTexture);

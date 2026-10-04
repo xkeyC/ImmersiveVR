@@ -48,6 +48,16 @@ pub fn load(options: &EngineOptions) -> Result<Engines> {
     )?);
     config.providers = options.providers.clone();
     let mut depth = DepthEngine::new(&config)?;
+    if depth.provider() == Provider::Cuda && config.cuda_graph {
+        // ONNX Runtime's CUDA provider records its graph per thread and in
+        // global capture mode: the depth thread would record it while the
+        // capture and warp threads use CUDA, which breaks the recording
+        // (cudaErrorStreamCaptureInvalidated). TensorRT's is unaffected.
+        let providers = std::mem::replace(&mut config.providers, vec![Provider::Cuda]);
+        config.cuda_graph = false;
+        depth = DepthEngine::new(&config)?;
+        config.providers = providers;
+    }
     depth.warmup(5)?;
     tracing::info!(provider = %depth.provider(), "depth ready");
 
