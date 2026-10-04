@@ -11,7 +11,7 @@ There is also a [PCVR client](#pcvr-client) (Unity + OpenXR). It draws the same 
 ## Features
 
 - **Real-time 2D to 3D.** Depth-Anything-V2-Small depth plus iw3 mlbw_l2 stereo, computed for every frame. Object outlines stay clean, with no ghosting.
-- **High performance, entirely on the GPU.** Capture (D3D11 to CUDA), scaling, the depth and stereo models (TensorRT), the eye rendering (a CUDA kernel) and encoding (NVENC) all stay in GPU memory. At 1440p every frame is new at 60 fps, using about half the GPU.
+- **High performance, entirely on the GPU.** Capture (D3D11 to CUDA), scaling, the depth and stereo models (TensorRT), the eye rendering (a CUDA kernel) and encoding (NVENC) all stay in GPU memory. At 1440p every frame is new at 60 fps.
 - **Low latency.**
   - Encoder settings follow [Sunshine](https://github.com/LizardByte/Sunshine). Every frame fits within a frame time of the link, and keyframes are sent only on demand, so there are no periodic bursts.
   - The server drops frames to catch up when a client falls behind.
