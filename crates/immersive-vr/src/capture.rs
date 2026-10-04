@@ -13,7 +13,7 @@ use cudarc::driver::{sys, CudaStream, DevicePtrMut};
 use std::{
     ffi::c_void,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant},
@@ -21,7 +21,10 @@ use std::{
 use windows::{
     core::Interface,
     Win32::Graphics::{
-        Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT},
+        Direct3D11::{
+            ID3D11Device, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_DEFAULT,
+        },
         Dxgi::Common::DXGI_SAMPLE_DESC,
     },
 };
@@ -71,7 +74,9 @@ impl LatestFrame {
         let (frame, _) = self
             .arrived
             .wait_timeout_while(frame, timeout, |frame| {
-                frame.as_ref().is_none_or(|frame| frame.sequence <= sequence)
+                frame
+                    .as_ref()
+                    .is_none_or(|frame| frame.sequence <= sequence)
             })
             .unwrap_or_else(|e| e.into_inner());
         frame.clone().filter(|frame| frame.sequence > sequence)
@@ -105,7 +110,11 @@ impl ImagePool {
         {
             self.images.clear();
         }
-        if let Some(free) = self.images.iter().position(|image| Arc::strong_count(image) == 1) {
+        if let Some(free) = self
+            .images
+            .iter()
+            .position(|image| Arc::strong_count(image) == 1)
+        {
             return Ok(Some(free));
         }
         if self.images.len() == POOL_LIMIT {
@@ -118,10 +127,11 @@ impl ImagePool {
 }
 
 /// `cuGraphicsD3D11RegisterResource`, which cudarc does not bind.
-type RegisterD3d11 =
+pub type RegisterD3d11 =
     unsafe extern "system" fn(*mut sys::CUgraphicsResource, *mut c_void, u32) -> sys::CUresult;
 
-fn register_d3d11() -> Result<RegisterD3d11> {
+/// `cuGraphicsD3D11RegisterResource`, loaded from the CUDA driver once.
+pub fn register_d3d11() -> Result<RegisterD3d11> {
     static FUNCTION: OnceLock<std::result::Result<RegisterD3d11, String>> = OnceLock::new();
     FUNCTION
         .get_or_init(|| {
@@ -171,7 +181,10 @@ impl Interop {
             MipLevels: 1,
             ArraySize: 1,
             Format: desc.Format,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -179,7 +192,8 @@ impl Interop {
         };
         let mut texture = None;
         // SAFETY: as above.
-        unsafe { device.CreateTexture2D(&ours, None, Some(&mut texture)) }.context("interop texture")?;
+        unsafe { device.CreateTexture2D(&ours, None, Some(&mut texture)) }
+            .context("interop texture")?;
         let texture = texture.context("interop texture")?;
         gpu.context()
             .bind_to_thread()
@@ -194,7 +208,8 @@ impl Interop {
             check(
                 sys::cuGraphicsResourceSetMapFlags_v2(
                     resource,
-                    sys::CUgraphicsMapResourceFlags::CU_GRAPHICS_MAP_RESOURCE_FLAGS_READ_ONLY as u32,
+                    sys::CUgraphicsMapResourceFlags::CU_GRAPHICS_MAP_RESOURCE_FLAGS_READ_ONLY
+                        as u32,
                 ),
                 "capture texture map flags",
             )?;
@@ -210,7 +225,11 @@ impl Interop {
     /// Copies `frame` into `image` (the same size); done when this returns.
     fn copy(&mut self, frame: &Frame, stream: &CudaStream, image: &mut GpuImage) -> Result<()> {
         // SAFETY: both textures belong to the frame's device, same size and format.
-        unsafe { frame.device_context().CopyResource(&self.texture, frame.as_raw_texture()) };
+        unsafe {
+            frame
+                .device_context()
+                .CopyResource(&self.texture, frame.as_raw_texture())
+        };
         let pitch = self.width * 4;
         let (target, guard) = image.buffer_mut().device_ptr_mut(stream);
         let cu_stream = stream.cu_stream();
@@ -249,7 +268,10 @@ impl Interop {
                     WidthInBytes: pitch,
                     Height: self.height,
                 };
-                check(sys::cuMemcpy2DAsync_v2(&copy, cu_stream), "copying the capture")
+                check(
+                    sys::cuMemcpy2DAsync_v2(&copy, cu_stream),
+                    "copying the capture",
+                )
             });
             check(
                 sys::cuGraphicsUnmapResources(1, &mut self.resource, cu_stream),
@@ -311,16 +333,19 @@ impl GraphicsCaptureApiHandler for Handler {
         let Some(slot) = self.pool.take(width, height)? else {
             self.dropped += 1;
             if self.dropped.is_power_of_two() {
-                tracing::warn!(dropped = self.dropped, "no free capture buffer: frame dropped");
+                tracing::warn!(
+                    dropped = self.dropped,
+                    "no free capture buffer: frame dropped"
+                );
             }
             return Ok(());
         };
         let image = Arc::get_mut(&mut self.pool.images[slot]).expect("free means unshared");
-        if self
-            .interop
-            .as_ref()
-            .is_some_and(|interop| interop.as_ref().is_ok_and(|i| (i.width, i.height) != (width, height)))
-        {
+        if self.interop.as_ref().is_some_and(|interop| {
+            interop
+                .as_ref()
+                .is_ok_and(|i| (i.width, i.height) != (width, height))
+        }) {
             self.interop = None;
         }
         let interop = self.interop.get_or_insert_with(|| {
@@ -381,7 +406,9 @@ pub fn start(index: usize, fps: u32, latest: Arc<LatestFrame>, gpu: Arc<Gpu>) ->
         .map_err(|error| anyhow!("starting capture: {error}"))?;
     Ok(Capture {
         size,
-        _control: Some(control),
+        control: Some(control),
+        stop: Arc::new(AtomicBool::new(false)),
+        thread: None,
     })
 }
 
@@ -406,12 +433,14 @@ pub fn start_synthetic(
         })
     };
     let pattern: Vec<u8> = (0..height).flat_map(|y| row(y).chain(row(y))).collect();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
     let mut pool = ImagePool::new(&gpu)?;
     let mut source = pool
         .stream
         .clone_htod(&pattern)
         .map_err(|error| anyhow!("uploading the test pattern: {error:?}"))?;
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("synthetic-capture".into())
         .spawn(move || -> Result<()> {
             let tick = Duration::from_secs_f64(1.0 / fps as f64);
@@ -419,7 +448,7 @@ pub fn start_synthetic(
             let mut shift = 0usize;
             let (mut made, mut report) = (0u64, Instant::now());
             let stream = pool.stream.clone();
-            loop {
+            while !stopping.load(Ordering::Acquire) {
                 let at = Instant::now();
                 // The whole picture scrolls sideways a few pixels a frame.
                 shift = (shift + 7) % width;
@@ -447,7 +476,10 @@ pub fn start_synthetic(
                     };
                     // SAFETY: both buffers are live and as large as the copy says.
                     unsafe {
-                        check(sys::cuMemcpy2DAsync_v2(&copy, stream.cu_stream()), "test pattern")?;
+                        check(
+                            sys::cuMemcpy2DAsync_v2(&copy, stream.cu_stream()),
+                            "test pattern",
+                        )?;
                         check(sys::cuStreamSynchronize(stream.cu_stream()), "test pattern")?;
                     }
                     drop((from_guard, to_guard));
@@ -468,17 +500,38 @@ pub fn start_synthetic(
                     next = now;
                 }
             }
+            Ok(())
         })
         .context("spawning the synthetic capture thread")?;
     tracing::info!(width, height, fps, "synthetic capture (test pattern)");
     Ok(Capture {
         size,
-        _control: None,
+        control: None,
+        stop,
+        thread: Some(thread),
     })
 }
 
 /// A running capture; it stops when this is dropped.
 pub struct Capture {
     pub size: (usize, usize),
-    _control: Option<CaptureControl<Handler, anyhow::Error>>,
+    control: Option<CaptureControl<Handler, anyhow::Error>>,
+    /// Stops the synthetic source, and its thread (joined on drop: a host
+    /// may unload the code right after).
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<Result<()>>>,
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(control) = self.control.take() {
+            if let Err(error) = control.stop() {
+                tracing::warn!(%error, "stopping the capture");
+            }
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }

@@ -1,0 +1,27 @@
+[package]
+name = "ivr-native"
+description = "ImmersiveVR's 2D-to-3D pipeline as a native plugin (Unity, or any D3D11 host)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ivr_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+immersive-vr = { path = "../immersive-vr" }
+depth-infer.workspace = true
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# The versions immersive-vr uses.
+cudarc = { version = "0.19", default-features = false, features = ["driver", "nvrtc", "fallback-dynamic-loading", "cuda-12020"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }
+
+[dev-dependencies]
+libloading = "0.9"
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }

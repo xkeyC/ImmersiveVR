@@ -27,7 +27,10 @@ use ort::{
     session::{IoBinding, Session},
     value::{Tensor, TensorElementType, TensorRef, ValueType},
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// Where a session's device outputs live: the GPU with CUDA / TensorRT,
 /// host memory otherwise.
@@ -50,7 +53,17 @@ fn device_allocator(session: &Session, provider: Provider, device_id: u32) -> Re
 /// model made it (GPU memory on CUDA) for [`WarpEngine::render`].
 pub struct StereoFields {
     value: Tensor<f32>,
+    // Last: frees `value`'s memory. ort tensors do not keep their allocator,
+    // and fields can outlive the engine (another thread drops the last ones).
+    _allocator: Arc<DeviceAllocator>,
 }
+
+/// A session's device allocator, kept alive by everything it allocated.
+struct DeviceAllocator(Allocator);
+
+// SAFETY: ONNX Runtime's allocators are thread-safe (its CUDA arena locks);
+// holders on other threads only keep it alive, the engine allocates.
+unsafe impl Sync for DeviceAllocator {}
 
 impl StereoFields {
     /// `(channels, height, width)` of the fields.
@@ -142,19 +155,20 @@ pub struct StereoEngine {
     channels: usize,
     fields: Vec<f32>,
     failures: Vec<ProviderFailure>,
-    device: Allocator,
     binding: IoBinding,
     /// Host inputs, copied to the device when bound.
     depth_input: Tensor<f32>,
     divergence_input: Tensor<f32>,
     convergence_input: Tensor<f32>,
+    // Last: the binding's output was allocated by it.
+    device: Arc<DeviceAllocator>,
 }
 
 impl StereoEngine {
     pub fn new(model: &Path, providers: &[Provider], device_id: u32) -> Result<Self> {
         let (session, provider, (width, height, channels), failures) =
             load(model, providers, device_id, check_fields)?;
-        let device = device_allocator(&session, provider, device_id)?;
+        let device = Arc::new(DeviceAllocator(device_allocator(&session, provider, device_id)?));
         let binding = session.create_binding()?;
         let host = Allocator::default();
         Ok(Self {
@@ -197,14 +211,17 @@ impl StereoEngine {
         self.binding.bind_input("divergence", &self.divergence_input)?;
         self.binding.bind_input("convergence", &self.convergence_input)?;
         // A new output buffer each run: the warp may still read the last one.
-        let output = Tensor::<f32>::new(&self.device, [1usize, self.channels, height, width])?;
+        let output = Tensor::<f32>::new(&self.device.0, [1usize, self.channels, height, width])?;
         self.binding.bind_output("fields", output)?;
         let mut outputs = self.session.run_binding(&self.binding)?;
         let value = outputs
             .remove("fields")
             .ok_or_else(|| Error::Ort("run returned no `fields`".into()))?
             .downcast::<ort::value::TensorValueType<f32>>()?;
-        Ok(StereoFields { value })
+        Ok(StereoFields {
+            value,
+            _allocator: self.device.clone(),
+        })
     }
 
     pub fn width(&self) -> usize {
@@ -303,10 +320,11 @@ pub struct WarpEngine {
     provider: Provider,
     /// Fields `(channels, height, width)` the graph takes.
     fields_shape: (usize, usize, usize),
-    device: Allocator,
     binding: IoBinding,
     /// The picture's host buffer, for the current size.
     color: Option<Tensor<u8>>,
+    // Last: the binding's buffers may have been allocated by it.
+    device: Arc<DeviceAllocator>,
 }
 
 /// A frame buffer in the warp's device memory (GPU with CUDA) for
@@ -317,6 +335,8 @@ pub struct DeviceFrame {
     value: Tensor<u8>,
     width: usize,
     height: usize,
+    // Last: frees `value`'s memory (see StereoFields).
+    _allocator: Arc<DeviceAllocator>,
 }
 
 impl DeviceFrame {
@@ -339,7 +359,7 @@ impl DeviceFrame {
 impl WarpEngine {
     pub fn new(model: &Path, providers: &[Provider], device_id: u32) -> Result<Self> {
         let (session, provider, fields_shape, _) = load(model, providers, device_id, check_warp)?;
-        let device = device_allocator(&session, provider, device_id)?;
+        let device = Arc::new(DeviceAllocator(device_allocator(&session, provider, device_id)?));
         let binding = session.create_binding()?;
         Ok(Self {
             session,
@@ -372,9 +392,10 @@ impl WarpEngine {
     /// A frame buffer for `width x height` pictures in the warp's device memory.
     pub fn new_frame(&self, width: usize, height: usize) -> Result<DeviceFrame> {
         Ok(DeviceFrame {
-            value: Tensor::new(&self.device, [1usize, height * 3, width])?,
+            value: Tensor::new(&self.device.0, [1usize, height * 3, width])?,
             width,
             height,
+            _allocator: self.device.clone(),
         })
     }
 

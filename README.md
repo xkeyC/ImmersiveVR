@@ -6,6 +6,8 @@ ImmersiveVR 把 Windows 桌面实时转成立体 3D，串流到 Meta Quest 等 V
 
 PC 采集屏幕后估计每个像素的深度，用 [iw3](https://github.com/nagadomi/nunif) 的 mlbw_l2 网络在 PC 上渲染出左右两只眼的画面，再用 NVENC 直接从显存编码，通过局域网发给头显。头显浏览器用 WebCodecs 硬件解码，再通过 WebXR 合成层显示成一块可调的虚拟曲面屏。
 
+另有 [PCVR 客户端](#pcvr-客户端)（Unity + OpenXR）：同一套转换在 PC 上直接画进 VR 场景，不经过视频编码，可配合 SteamVR、Pimax、Virtual Desktop、Quest Link 等 PC 端 VR 运行时使用。
+
 ## 特性
 
 - **实时 2D 转 3D**：Depth-Anything-V2-Small 深度估计 + iw3 mlbw_l2 立体生成，每帧都算。物体轮廓清晰，没有重影。
@@ -36,12 +38,14 @@ PC 采集屏幕后估计每个像素的深度，用 [iw3](https://github.com/nag
 |---|---|
 | `ImmersiveVR-v0.0.1-windows-x64.zip` | 主程序 `immersive-vr.exe`、ONNX Runtime（CUDA 12 版）及其需要的 CUDA / cuDNN 运行库 |
 | `ImmersiveVR-models-v0.0.1.zip` | 模型：`models/depth/`（Depth-Anything-V2-Small，770×434）和 `models/stereo/`（iw3 mlbw_l2 三个强度档） |
+| `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` | 可选，[PCVR 客户端](#pcvr-客户端) `ImmersiveVR.exe`，与主程序共用运行库和模型 |
 
-两个包解压到**同一个文件夹**，目录结构如下：
+这些包都解压到**同一个文件夹**，目录结构如下：
 
 ```
 ImmersiveVR/
-├─ immersive-vr.exe
+├─ immersive-vr.exe       网页串流版
+├─ ImmersiveVR.exe        PCVR 客户端（可选，连同 ImmersiveVR_Data/ 等）
 ├─ runtime/ort/…          ONNX Runtime 与运行库
 └─ models/
    ├─ depth/…
@@ -108,6 +112,17 @@ serving on https://192.168.1.20:13256/
 - **提示无法解码**：换另一种编码（面板「编码」）。Quest 3 支持 H.265 和 AV1 硬件解码。
 - **延迟或卡顿**：先降低传输分辨率或码率。PC 有线连接路由器，头显尽量靠近路由器，用 5 GHz 或 6 GHz 频段。
 - **3D 感太强或太弱**：调「立体强度」；觉得刺眼就调小一点。
+
+## PCVR 客户端
+
+`ImmersiveVR.exe` 用 PC 端 VR 运行时（OpenXR）显示 3D 桌面：转换和网页版相同，左右眼画面直接从显存交给 VR 场景，不做视频编码，也不需要浏览器。适合 Pimax、Index 等 PCVR 头显，或者通过 Virtual Desktop、Steam Link、Quest Link 连接电脑的 Quest。
+
+1. 把 `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` 解压到主程序所在的文件夹（共用 `runtime/` 和 `models/`）。
+2. 启动头显的 PC 端软件，让它成为系统的 OpenXR 运行时（SteamVR、Pimax Play、Virtual Desktop、Meta Quest Link 都可以在各自的设置里设为默认 OpenXR 运行时）。
+3. 双击 `ImmersiveVR.exe`。电脑上只开一个小窗口，失去焦点也继续运行；屏幕出现在你正前方，每次戴上头显都会重新摆到面前。
+4. 面板和网页版一样：握持键开关，扳机点击。可调画面分辨率（默认原生，4K 屏即 2160p）、立体强度、会聚、屏幕距离 / 宽度 / 曲率 / 高度，以及**锐度**（屏幕在视野里显示得比画面小时，越锐越清楚，过高会闪）。设置自动保存。
+
+和网页版相比没有编码选项、透视和电脑静音：画面不经过编码，声音由 VR 运行时（例如 Virtual Desktop）自己处理。通过 Virtual Desktop 等无线串流时，整幅 VR 画面仍会被它们编码，清晰度受其码率影响。
 
 ## 工作原理
 
@@ -224,6 +239,15 @@ IVR_DEPTH_MODEL_DIR=models/depth IVR_STEREO_MODEL_DIR=models/stereo ORT_DYLIB_PA
   cargo test --release --workspace
 ```
 
+### PCVR 客户端
+
+1. 编译原生库：`cargo build --release -p ivr-native`（产物 `target/release/ivr_native.dll`，即整条流水线的 C 接口）。
+2. 用 Unity 6.6（6000.6.4f1）打开 `unity/`，场景是 `Assets/ImmersiveVR/Scenes/Desktop3D`。
+3. 编辑器里按 Play 即可在头显里运行。每次 Play 加载的是 `ivr_native.dll` 的副本，退出 Play 时卸载，所以重新编译 Rust 后不用重启编辑器。菜单 **ImmersiveVR → Play Mode Runtime** 选择 Play 时用哪个 OpenXR 运行时（重启编辑器后保留）。
+4. 菜单 **ImmersiveVR → Build Release** 生成正式版：程序在 `target/unity/ImmersiveVR/`，压缩包在 `target/dist/`。
+
+`cargo test --release -p ivr-native` 会模拟 Unity 的加载方式（受限的 DLL 搜索路径、反复加载卸载）跑通整条流水线。
+
 开发工具：
 - `--synthetic` 用一张移动的测试图代替屏幕，用来测吞吐。
 - `--synthetic-fps 240` 模拟高刷新率显示器。
@@ -237,6 +261,8 @@ IVR_DEPTH_MODEL_DIR=models/depth IVR_STEREO_MODEL_DIR=models/stereo ORT_DYLIB_PA
 |---|---|
 | `crates/immersive-vr` | 主程序：采集、流水线、CUDA 核函数（`kernels.cu`）、NVENC、声音、HTTPS / WebSocket 服务；`web/` 是网页端，编译时嵌入程序 |
 | `crates/depth-infer` | ONNX Runtime 推理：深度、mlbw 立体字段、深度归一化与平滑 |
+| `crates/ivr-native` | 流水线的原生库（`ivr_native.dll`），供 PCVR 客户端在进程内调用 |
+| `unity/` | PCVR 客户端（Unity 6.6 + OpenXR + XR Interaction Toolkit） |
 | `scripts/` | 模型导出、ONNX Runtime 下载、测试工具 |
 | `docs/` | 研究笔记 |
 
@@ -247,6 +273,7 @@ IVR_DEPTH_MODEL_DIR=models/depth IVR_STEREO_MODEL_DIR=models/stereo ORT_DYLIB_PA
 - [Sunshine](https://github.com/LizardByte/Sunshine)（LizardByte）：低延迟编码参数和帧节奏的思路。
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) 与 [ort](https://github.com/pykeio/ort)：模型推理。
 - [moq-nvenc](https://crates.io/crates/moq-nvenc)（源自 [nvidia-video-codec-sdk](https://github.com/ViliamVadocz/nvidia-video-codec-sdk)）与 [cudarc](https://github.com/coreylowman/cudarc)：NVENC 与 CUDA 绑定。
+- [Unity](https://unity.com/) 的 OpenXR Plugin 与 XR Interaction Toolkit：PCVR 客户端。
 - [windows-capture](https://github.com/NiiightmareXD/windows-capture)、[wasapi-rs](https://github.com/HEnquist/wasapi-rs)、[axum](https://github.com/tokio-rs/axum) 等 Rust 生态项目。
 
 ## 许可证

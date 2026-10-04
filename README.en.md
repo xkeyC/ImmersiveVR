@@ -6,6 +6,8 @@ ImmersiveVR turns your Windows desktop into stereoscopic 3D in real time and str
 
 The PC captures the screen and estimates depth for every pixel. It then renders both eyes with [iw3](https://github.com/nagadomi/nunif)'s mlbw_l2 network and encodes them with NVENC straight from GPU memory. The stream travels over your LAN to the headset. There the browser decodes it in hardware with WebCodecs and shows it as an adjustable, curved virtual screen through WebXR compositor layers.
 
+There is also a [PCVR client](#pcvr-client) (Unity + OpenXR). It draws the same conversion straight into a VR scene on the PC, with no video encoding, and works with PC VR runtimes such as SteamVR, Pimax, Virtual Desktop and Quest Link.
+
 ## Features
 
 - **Real-time 2D to 3D.** Depth-Anything-V2-Small depth plus iw3 mlbw_l2 stereo, computed for every frame. Object outlines stay clean, with no ghosting.
@@ -35,18 +37,20 @@ The PC captures the screen and estimates depth for every pixel. It then renders 
 
 ### 1. Download
 
-Download the two v0.0.1 packages from [Releases](../../releases):
+Download the v0.0.1 packages from [Releases](../../releases):
 
 | File | Contents |
 |---|---|
 | `ImmersiveVR-v0.0.1-windows-x64.zip` | `immersive-vr.exe`, ONNX Runtime (CUDA 12 build) and the CUDA / cuDNN runtime libraries it needs |
 | `ImmersiveVR-models-v0.0.1.zip` | Models: `models/depth/` (Depth-Anything-V2-Small, 770×434) and `models/stereo/` (iw3 mlbw_l2, three strength levels) |
+| `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` | Optional: the [PCVR client](#pcvr-client) `ImmersiveVR.exe`, which shares the runtime libraries and models |
 
-Extract both into **the same folder**:
+Extract them all into **the same folder**:
 
 ```
 ImmersiveVR/
-├─ immersive-vr.exe
+├─ immersive-vr.exe       the web streaming server
+├─ ImmersiveVR.exe        the PCVR client (optional, with ImmersiveVR_Data/ etc.)
 ├─ runtime/ort/…          ONNX Runtime and runtime libraries
 └─ models/
    ├─ depth/…
@@ -113,6 +117,17 @@ The most useful options are below; run `immersive-vr.exe --help` for the full li
 - **"Cannot decode".** Switch the codec in the panel. Quest 3 decodes both H.265 and AV1 in hardware.
 - **Latency or stutter.** Lower the resolution or bitrate. Wire the PC to the router, keep the headset close to it, and use the 5 GHz or 6 GHz band.
 - **3D too strong or too weak.** Adjust 3D strength. Lower it if the image is straining.
+
+## PCVR client
+
+`ImmersiveVR.exe` shows the 3D desktop through a PC VR runtime (OpenXR). The conversion is the same as the web version's, but both eye images go straight from GPU memory into the VR scene: no video encoding and no browser. It suits PCVR headsets such as Pimax or Index, and Quests connected through Virtual Desktop, Steam Link or Quest Link.
+
+1. Extract `ImmersiveVR-PCVR-v0.0.1-windows-x64.zip` into the main package's folder (it shares `runtime/` and `models/`).
+2. Start your headset's PC software and make it the system's OpenXR runtime (SteamVR, Pimax Play, Virtual Desktop and Meta Quest Link each have a setting for it).
+3. Double-click `ImmersiveVR.exe`. It opens a small window on the PC and keeps running without focus. The screen appears in front of you, and again whenever you put the headset back on.
+4. The panel works like the web one: grip toggles it, the trigger clicks. It sets the picture resolution (native by default: 2160p on a 4K monitor), 3D strength, convergence, screen distance / width / curvature / height, and **sharpness** (when the screen is shown smaller than the picture, sharper is clearer; too sharp shimmers). Settings are saved.
+
+Compared with the web version there is no codec choice, passthrough or PC mute: nothing is encoded, and sound is left to the VR runtime (Virtual Desktop, for example). Wireless streamers such as Virtual Desktop still encode the whole VR view, so their bitrate limits the sharpness.
 
 ## How it works
 
@@ -228,6 +243,15 @@ IVR_DEPTH_MODEL_DIR=models/depth IVR_STEREO_MODEL_DIR=models/stereo ORT_DYLIB_PA
   cargo test --release --workspace
 ```
 
+### PCVR client
+
+1. Build the native library: `cargo build --release -p ivr-native` (`target/release/ivr_native.dll`, the pipeline behind a C API).
+2. Open `unity/` in Unity 6.6 (6000.6.4f1); the scene is `Assets/ImmersiveVR/Scenes/Desktop3D`.
+3. Press Play to run it in the headset. Each Play loads a copy of `ivr_native.dll` and unloads it afterwards, so Rust rebuilds need no editor restart. **ImmersiveVR → Play Mode Runtime** picks the OpenXR runtime for Play mode (kept across editor restarts).
+4. **ImmersiveVR → Build Release** makes the release: the app in `target/unity/ImmersiveVR/`, the zip in `target/dist/`.
+
+`cargo test --release -p ivr-native` runs the whole pipeline the way Unity loads it (restricted DLL search, repeated load and unload).
+
 Development tools:
 - `--synthetic` streams a moving test pattern instead of the screen, for throughput measurements.
 - `--synthetic-fps 240` emulates a high-refresh monitor.
@@ -241,6 +265,8 @@ Development tools:
 |---|---|
 | `crates/immersive-vr` | The server: capture, pipeline, CUDA kernels (`kernels.cu`), NVENC, sound, HTTPS / WebSocket. `web/` is the client, embedded at build time |
 | `crates/depth-infer` | ONNX Runtime inference: depth, mlbw stereo fields, depth normalization and smoothing |
+| `crates/ivr-native` | The pipeline as a native library (`ivr_native.dll`), called in-process by the PCVR client |
+| `unity/` | The PCVR client (Unity 6.6 + OpenXR + XR Interaction Toolkit) |
 | `scripts/` | Model export, ONNX Runtime download, test tools |
 | `docs/` | Research notes |
 
@@ -251,6 +277,7 @@ Development tools:
 - [Sunshine](https://github.com/LizardByte/Sunshine) (LizardByte): ideas for low-latency encoder settings and frame pacing.
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) and [ort](https://github.com/pykeio/ort): inference.
 - [moq-nvenc](https://crates.io/crates/moq-nvenc) (derived from [nvidia-video-codec-sdk](https://github.com/ViliamVadocz/nvidia-video-codec-sdk)) and [cudarc](https://github.com/coreylowman/cudarc): NVENC and CUDA bindings.
+- [Unity](https://unity.com/)'s OpenXR Plugin and XR Interaction Toolkit: the PCVR client.
 - [windows-capture](https://github.com/NiiightmareXD/windows-capture), [wasapi-rs](https://github.com/HEnquist/wasapi-rs), [axum](https://github.com/tokio-rs/axum) and the rest of the Rust ecosystem.
 
 ## License

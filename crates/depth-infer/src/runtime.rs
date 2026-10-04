@@ -106,10 +106,82 @@ fn prepend_library_dirs(dirs: &[PathBuf]) -> Result<()> {
         }
         paths.push(absolute(dir.clone())?);
     }
+    // A host that called SetDefaultDllDirectories (the Unity editor does)
+    // no longer searches PATH: register the directories there as well.
+    for dir in &paths {
+        add_dll_directory(dir);
+    }
+    preload_first_copies(&paths);
     let joined = std::env::join_paths(paths.into_iter().chain(std::env::split_paths(&current)))
         .map_err(|error| Error::Runtime(format!("cannot extend PATH: {error}")))?;
     std::env::set_var("PATH", joined);
     Ok(())
+}
+
+#[cfg(windows)]
+fn add_dll_directory(dir: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AddDllDirectory(new_directory: *const u16) -> *mut std::ffi::c_void;
+    }
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: a NUL-terminated wide path; the cookie is never removed (the
+    // directories stay for the process, as the PATH entries do).
+    if unsafe { AddDllDirectory(wide.as_ptr()) }.is_null() {
+        tracing::warn!(dir = %dir.display(), "AddDllDirectory failed");
+    }
+}
+
+/// The libraries the CUDA and TensorRT providers link against, dependencies
+/// first. cuDNN's own parts are loaded by cuDNN, by name.
+#[cfg(windows)]
+const PROVIDER_DEPENDENCIES: &[&str] = &[
+    "cudart64_12.dll",
+    "cublasLt64_12.dll",
+    "cublas64_12.dll",
+    "cufft64_11.dll",
+    "cudnn64_9.dll",
+    "nvinfer_10.dll",
+    "nvinfer_plugin_10.dll",
+    "nvonnxparser_10.dll",
+];
+
+/// Loads each provider dependency from the first directory that has it.
+/// PATH gives the directories an order, AddDllDirectory does not: a host
+/// that only searches the latter could pick an older cuBLAS from a later
+/// directory (error 127, a missing entry point). Once loaded, a library is
+/// what every later load of that name gets.
+#[cfg(windows)]
+fn preload_first_copies(dirs: &[PathBuf]) {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryExW(name: *const u16, file: *mut std::ffi::c_void, flags: u32) -> *mut std::ffi::c_void;
+    }
+    // The library's own directory first, then the default search.
+    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x100;
+    const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x1000;
+    for name in PROVIDER_DEPENDENCIES {
+        let Some(path) = dirs.iter().map(|dir| dir.join(name)).find(|path| path.is_file()) else {
+            continue;
+        };
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        // SAFETY: a NUL-terminated wide path; the library stays loaded for
+        // the process, as the providers that use it do.
+        let module = unsafe {
+            LoadLibraryExW(
+                wide.as_ptr(),
+                std::ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+            )
+        };
+        if module.is_null() {
+            tracing::warn!(path = %path.display(), error = %std::io::Error::last_os_error(), "cannot preload");
+        } else {
+            tracing::info!(path = %path.display(), "preloaded");
+        }
+    }
 }
 
 #[cfg(not(windows))]

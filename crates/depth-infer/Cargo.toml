@@ -13,7 +13,7 @@ tensorrt = ["ort/tensorrt"]
 directml = ["ort/directml"]
 
 [dependencies]
-ort = { workspace = true, features = ["std", "tracing", "load-dynamic", "api-24"] }
+ort = { workspace = true, features = ["std", "load-dynamic", "api-24"] }
 thiserror.workspace = true
 tracing.workspace = true
 

@@ -232,9 +232,60 @@ pub fn stereo_level(divergence: f32, levels: usize) -> usize {
     level.min(levels.saturating_sub(1))
 }
 
+/// Where rendered frames go.
+pub enum Output {
+    /// NVENC and the WebSocket clients (the browser): both eyes stacked as NV12.
+    Stream {
+        encoder: EncoderDefaults,
+        chunks: broadcast::Sender<Arc<Chunk>>,
+        stream: watch::Sender<Option<Arc<StreamInfo>>>,
+    },
+    /// Both eyes as RGBA images for an in-process consumer (the Unity plugin).
+    Eyes(Arc<EyeOutput>),
+}
+
+/// One rendered pair of eye images (RGBA, gamma-encoded) on the GPU.
+pub struct Eyes {
+    pub left: GpuImage,
+    pub right: GpuImage,
+    pub meta: FrameMeta,
+    /// When the picture's capture arrived.
+    pub captured: Instant,
+}
+
+/// The newest eye pair, for a consumer that takes frames at its own pace.
+/// A pair the consumer holds (an `Arc`) is not rendered into again until
+/// it lets go.
+#[derive(Default)]
+pub struct EyeOutput {
+    latest: Mutex<Option<Arc<Eyes>>>,
+    frames: AtomicU64,
+}
+
+impl EyeOutput {
+    /// The newest pair and its frame number (counts up from 1), if any.
+    pub fn latest(&self) -> Option<(u64, Arc<Eyes>)> {
+        let latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        Some((self.frames.load(Ordering::Acquire), latest))
+    }
+
+    fn publish(&self, eyes: Arc<Eyes>) {
+        *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(eyes);
+        self.frames.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 pub struct Pipeline {
     pub capture_size: (usize, usize),
-    pub encoder: EncoderDefaults,
+    pub output: Output,
+    /// Output frames per second (the capture sampling grid's rate).
+    pub fps: u32,
+    /// Set to stop every thread; `run` returns once they have.
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
     pub engine: DepthEngine,
     /// mlbw_l2 fields models by level (iw3 levels 1, 2, 3).
     pub stereo: Vec<StereoEngine>,
@@ -246,8 +297,11 @@ pub struct Pipeline {
     pub latest: Arc<LatestFrame>,
     /// How often depth and fields may run; 0 = for every captured frame.
     pub depth_fps: f64,
-    pub chunks: broadcast::Sender<Arc<Chunk>>,
-    pub stream: watch::Sender<Option<Arc<StreamInfo>>>,
+}
+
+/// Whether the pipeline was asked to stop.
+fn stopping(stop: &std::sync::atomic::AtomicBool) -> bool {
+    stop.load(Ordering::Acquire)
 }
 
 /// A picture scaled to the eye size, on the GPU.
@@ -332,6 +386,7 @@ struct DepthSlot {
 /// Depth and normalization for each new picture, on its own thread so the
 /// next picture's depth overlaps this one's mlbw fields.
 struct DepthStage {
+    stop: Arc<std::sync::atomic::AtomicBool>,
     engine: DepthEngine,
     /// Model-sized BGRA frames, newest only (the sender drops when full).
     inputs: mpsc::Receiver<Vec<u8>>,
@@ -346,6 +401,9 @@ impl DepthStage {
         let (mut runs, mut cuts, mut time) = (0u64, 0u64, Duration::ZERO);
         let mut report = Instant::now();
         loop {
+            if stopping(&self.stop) {
+                return Ok(());
+            }
             match self.inputs.recv_timeout(Duration::from_millis(100)) {
                 Ok(input) => {
                     let started = Instant::now();
@@ -387,6 +445,7 @@ impl DepthStage {
 /// mlbw fields for each new depth map, and again with the last one when the
 /// stereo settings change.
 struct FieldsStage {
+    stop: Arc<std::sync::atomic::AtomicBool>,
     stereo: Vec<StereoEngine>,
     controls: Arc<Controls>,
     slot: Arc<(Mutex<DepthSlot>, Condvar)>,
@@ -400,6 +459,9 @@ impl FieldsStage {
         let (mut runs, mut time) = (0u64, Duration::ZERO);
         let mut report = Instant::now();
         loop {
+            if stopping(&self.stop) {
+                return Ok(());
+            }
             let new_depth = {
                 let (slot, changed) = &*self.slot;
                 let slot = slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -455,10 +517,16 @@ impl FieldsStage {
 /// Renders both eyes once per new picture (with the newest fields), and
 /// again when fields arrive for a settings change.
 struct Render {
+    stop: Arc<std::sync::atomic::AtomicBool>,
     gpu: Arc<Gpu>,
     delta_scale: f32,
     shared: Arc<Shared>,
+    /// Eye images for an in-process consumer instead of NV12 frames.
+    eyes: Option<Arc<EyeOutput>>,
 }
+
+/// Eye pairs the render thread keeps per picture size (see [`FRAME_BUFFERS`]).
+const EYE_BUFFERS: usize = 4;
 
 impl Render {
     fn run(self) -> Result<()> {
@@ -470,9 +538,13 @@ impl Render {
         // Buffers for the current picture size; one is reused once nothing
         // else holds it.
         let mut buffers: Vec<Arc<GpuFrame>> = Vec::new();
+        let mut eye_buffers: Vec<Arc<Eyes>> = Vec::new();
         let (mut renders, mut render_time) = (0u64, Duration::ZERO);
         let mut report = Instant::now();
         loop {
+            if stopping(&self.stop) {
+                return Ok(());
+            }
             let (picture, fields) = {
                 let input = self.shared.input.lock().unwrap_or_else(|e| e.into_inner());
                 let (input, _) = self
@@ -501,10 +573,55 @@ impl Render {
                         .layout;
                     // A picture for an earlier layout waits for its own.
                     let Some(layout) = layout.filter(|l| {
-                        (l.left.width, l.left.height) == (picture.image.width(), picture.image.height())
+                        (l.left.width, l.left.height)
+                            == (picture.image.width(), picture.image.height())
                     }) else {
                         continue;
                     };
+                    if let Some(output) = &self.eyes {
+                        let (width, height) = (picture.image.width(), picture.image.height());
+                        if eye_buffers.first().is_some_and(|eyes| {
+                            (eyes.left.width(), eyes.left.height()) != (width, height)
+                        }) {
+                            eye_buffers.clear();
+                        }
+                        let free = match eye_buffers
+                            .iter()
+                            .position(|eyes| Arc::strong_count(eyes) == 1)
+                        {
+                            Some(free) => free,
+                            None => {
+                                anyhow::ensure!(
+                                    eye_buffers.len() < EYE_BUFFERS,
+                                    "all {EYE_BUFFERS} eye buffers are in use"
+                                );
+                                eye_buffers.push(Arc::new(Eyes {
+                                    left: GpuImage::new(&stream, width, height)?,
+                                    right: GpuImage::new(&stream, width, height)?,
+                                    meta: fields.meta,
+                                    captured: picture.captured,
+                                }));
+                                eye_buffers.len() - 1
+                            }
+                        };
+                        let eyes = Arc::get_mut(&mut eye_buffers[free]).expect("held only here");
+                        self.gpu.warp_eyes(
+                            &stream,
+                            &picture.image,
+                            &fields.data,
+                            self.delta_scale,
+                            &mut eyes.left,
+                            &mut eyes.right,
+                        )?;
+                        eyes.meta = fields.meta;
+                        eyes.captured = picture.captured;
+                        output.publish(eye_buffers[free].clone());
+                        render_time += started.elapsed();
+                        renders += 1;
+                        rendered_picture = Some(picture);
+                        rendered_fields = Some(fields);
+                        continue;
+                    }
                     let (width, height) = (layout.width, layout.height);
                     if buffers
                         .first()
@@ -512,7 +629,10 @@ impl Render {
                     {
                         buffers.clear();
                     }
-                    let free = match buffers.iter().position(|frame| Arc::strong_count(frame) == 1) {
+                    let free = match buffers
+                        .iter()
+                        .position(|frame| Arc::strong_count(frame) == 1)
+                    {
                         Some(free) => free,
                         None => {
                             anyhow::ensure!(
@@ -524,8 +644,13 @@ impl Render {
                         }
                     };
                     let frame = Arc::get_mut(&mut buffers[free]).expect("held only here");
-                    self.gpu
-                        .warp(&stream, &picture.image, &fields.data, self.delta_scale, frame)?;
+                    self.gpu.warp(
+                        &stream,
+                        &picture.image,
+                        &fields.data,
+                        self.delta_scale,
+                        frame,
+                    )?;
                     let rendered = Arc::new(Rendered {
                         width,
                         height,
@@ -583,7 +708,8 @@ impl Grid {
 
     fn tick(&self, interval: Duration) -> Instant {
         let at = self.start + interval * self.ticks;
-        at.checked_sub(Duration::from_secs_f64(self.phase)).unwrap_or(at)
+        at.checked_sub(Duration::from_secs_f64(self.phase))
+            .unwrap_or(at)
     }
 
     /// Moves to the next tick past sampling `frame` at `tick`; with a source
@@ -598,7 +724,8 @@ impl Grid {
         let near_stream_rate = source_interval.is_some_and(|s| s > interval.as_secs_f64() * 0.75);
         if near_stream_rate {
             let waited = tick.saturating_duration_since(frame.at).as_secs_f64();
-            self.phase = (self.phase + 0.1 * (waited - TICK_AFTER_CAPTURE)).clamp(0.0, interval.as_secs_f64() * 0.9);
+            self.phase = (self.phase + 0.1 * (waited - TICK_AFTER_CAPTURE))
+                .clamp(0.0, interval.as_secs_f64() * 0.9);
         }
         self.ticks += 1;
     }
@@ -611,6 +738,7 @@ const DEPTH_SLACK: Duration = Duration::from_millis(4);
 /// Scales each new capture (on the GPU) to the streamed eye size for render
 /// and, when depth is due, to the depth model's size, which it reads back.
 struct ScaleStage {
+    stop: Arc<std::sync::atomic::AtomicBool>,
     gpu: Arc<Gpu>,
     latest: Arc<LatestFrame>,
     shared: Arc<Shared>,
@@ -651,6 +779,9 @@ impl ScaleStage {
         let mut stats = ScaleStats::default();
         let mut report = Instant::now();
         loop {
+            if stopping(&self.stop) {
+                return Ok(());
+            }
             if report.elapsed() >= Duration::from_secs(5) {
                 tracing::info!(
                     captured = stats.captured,
@@ -686,7 +817,9 @@ impl ScaleStage {
                 }
                 None => {
                     // Wake now and then to see a new target size.
-                    let frame = self.latest.wait_newer_than(sequence, Duration::from_millis(20));
+                    let frame = self
+                        .latest
+                        .wait_newer_than(sequence, Duration::from_millis(20));
                     if let Some(frame) = &frame {
                         grid_start = Some(frame.at);
                     }
@@ -808,14 +941,17 @@ struct StreamContext {
 }
 
 impl Pipeline {
-    /// Runs until a thread fails: sends each newly rendered frame to the
-    /// encoder as soon as it exists, and the last one again if nothing new
-    /// came for 1.5 frame intervals (so the stream and its keyframes keep
+    /// Runs until a thread fails or `stop` is set (then it waits for every
+    /// thread). With [`Output::Stream`] it sends each newly rendered frame to
+    /// the encoder as soon as it exists, and the last one again if nothing
+    /// new came for 1.5 frame intervals (so the stream and its keyframes keep
     /// flowing; a render that is merely late is not preceded by a repeat).
     pub fn run(self) -> Result<()> {
         let Pipeline {
             capture_size,
-            encoder: defaults,
+            output,
+            fps,
+            stop,
             engine,
             stereo,
             gpu,
@@ -823,22 +959,13 @@ impl Pipeline {
             controls,
             latest,
             depth_fps,
-            chunks,
-            stream,
         } = self;
-        let fps = defaults.fps;
         let model_size = (engine.width(), engine.height());
-        let context = StreamContext {
-            capture_size,
-            defaults,
-            cuda: gpu.context().clone(),
-            chunks,
-            stream,
-        };
         let shared = Arc::new(Shared::default());
         let (inputs, inputs_rx) = mpsc::sync_channel::<Vec<u8>>(1);
         let depth_slot = Arc::new((Mutex::new(DepthSlot::default()), Condvar::new()));
         let scale_stage = ScaleStage {
+            stop: stop.clone(),
             gpu: gpu.clone(),
             latest,
             shared: shared.clone(),
@@ -852,20 +979,27 @@ impl Pipeline {
             frame_interval: Duration::from_secs_f64(1.0 / fps as f64),
         };
         let depth_stage = DepthStage {
+            stop: stop.clone(),
             engine,
             inputs: inputs_rx,
             slot: depth_slot.clone(),
         };
         let fields_stage = FieldsStage {
+            stop: stop.clone(),
             stereo,
             controls: controls.clone(),
             slot: depth_slot,
             shared: shared.clone(),
         };
         let render = Render {
-            gpu,
+            stop: stop.clone(),
+            gpu: gpu.clone(),
             delta_scale,
             shared: shared.clone(),
+            eyes: match &output {
+                Output::Eyes(eyes) => Some(eyes.clone()),
+                Output::Stream { .. } => None,
+            },
         };
         let workers: Vec<JoinHandle<Result<()>>> = vec![
             std::thread::Builder::new()
@@ -881,108 +1015,179 @@ impl Pipeline {
                 .name("render".into())
                 .spawn(move || render.run())?,
         ];
-        let failed = |workers: Vec<JoinHandle<Result<()>>>| {
-            for worker in workers {
-                if worker.is_finished() {
-                    if let Ok(Err(error)) = worker.join() {
-                        return error.context("pipeline thread stopped");
-                    }
-                }
+        let result = match output {
+            Output::Stream {
+                encoder,
+                chunks,
+                stream,
+            } => {
+                let context = StreamContext {
+                    capture_size,
+                    defaults: encoder,
+                    cuda: gpu.context().clone(),
+                    chunks,
+                    stream,
+                };
+                stream_frames(&context, &controls, &shared, &stop, &workers, fps)
             }
-            anyhow::anyhow!("pipeline thread stopped")
+            Output::Eyes(_) => follow_layout(capture_size, &controls, &shared, &stop, &workers),
         };
-
-        let mut active: Option<Active> = None;
-        let mut generation = 0;
-        // The last rendered frame looked at, and the one being streamed.
-        let mut seen: Option<Arc<Rendered>> = None;
-        let mut current: Option<Arc<Rendered>> = None;
-        let repeat_after = Duration::from_secs_f64(1.5 / fps as f64);
-        let mut last_send = Instant::now();
-        let mut stats = Stats::default();
-        let mut report = Instant::now();
-        loop {
-            if workers.iter().any(JoinHandle::is_finished) {
-                return Err(failed(workers));
-            }
-            let (settings, _) = controls.get();
-            let stale = active
-                .as_ref()
-                .is_none_or(|a| (a.resolution, a.codec) != (settings.resolution, settings.codec));
-            if stale {
-                // The old NVENC session closes before the new one opens.
-                drop(active.take());
-                generation += 1;
-                let started = context.start(generation, settings)?;
-                let mut target = shared.target.lock().unwrap_or_else(|e| e.into_inner());
-                target.layout = Some(started.layout);
-                target.version += 1;
-                drop(target);
-                active = Some(started);
-                current = None;
-            }
-            let active_stream = active.as_mut().expect("started above");
-            let layout = active_stream.layout;
-
-            // Wait for a new rendered frame, at most until a repeat is due.
-            let deadline = last_send + repeat_after;
-            let newest = {
-                let output = shared.output.lock().unwrap_or_else(|e| e.into_inner());
-                let timeout = deadline.saturating_duration_since(Instant::now());
-                let (output, _) = shared
-                    .rendered
-                    .wait_timeout_while(output, timeout, |output| same_frame(output, &seen))
-                    .unwrap_or_else(|e| e.into_inner());
-                output.clone()
-            };
-            let mut fresh = false;
-            if !same_frame(&newest, &seen) {
-                seen = newest.clone();
-                // Frames rendered for an earlier layout are dropped.
-                if let Some(rendered) =
-                    newest.filter(|r| (r.width, r.height) == (layout.width, layout.height))
-                {
-                    current = Some(rendered);
-                    fresh = true;
+        // Every thread sees the flag within a frame or two; a failed one has
+        // stopped already.
+        stop.store(true, Ordering::Release);
+        let mut failure = result.err();
+        for worker in workers {
+            match worker.join() {
+                Ok(Err(error)) if failure.is_none() => {
+                    failure = Some(error.context("pipeline thread stopped"))
                 }
-            }
-            if fresh || Instant::now() >= deadline {
-                last_send = Instant::now();
-                if let Some(frame) = &current {
-                    // What the frame shows was captured then (repeats included).
-                    let captured_us = unix_us().saturating_sub(frame.captured.elapsed().as_micros() as u64);
-                    active_stream
-                        .encoder
-                        .send(&frame.frame, frame.meta, captured_us, controls.take_keyframe_request())
-                        .context("encoding")?;
-                    stats.send += last_send.elapsed();
-                    stats.frames += 1;
-                    stats.fresh += u64::from(fresh);
-                    if fresh {
-                        stats.latency.push(frame.captured.elapsed().as_secs_f64() * 1e3);
-                    }
+                Err(_) if failure.is_none() => {
+                    failure = Some(anyhow::anyhow!("pipeline thread panicked"))
                 }
+                _ => {}
             }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
 
-            if report.elapsed() >= Duration::from_secs(5) {
-                stats.latency.sort_by(f64::total_cmp);
-                let quantile = |q: f64| {
+/// [`Output::Eyes`]: no encoder; keeps the scale target at the settings'
+/// resolution until stopped or a thread fails.
+fn follow_layout(
+    capture_size: (usize, usize),
+    controls: &Controls,
+    shared: &Shared,
+    stop: &std::sync::atomic::AtomicBool,
+    workers: &[JoinHandle<Result<()>>],
+) -> Result<()> {
+    let mut resolution = None;
+    while !stopping(stop) {
+        if workers.iter().any(JoinHandle::is_finished) {
+            anyhow::bail!("a pipeline thread stopped");
+        }
+        let (settings, _) = controls.get();
+        if resolution != Some(settings.resolution) {
+            resolution = Some(settings.resolution);
+            let mut target = shared.target.lock().unwrap_or_else(|e| e.into_inner());
+            target.layout = Some(Layout::new(capture_size, settings.resolution));
+            target.version += 1;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+/// [`Output::Stream`]: encodes and sends rendered frames until stopped or a
+/// thread fails.
+fn stream_frames(
+    context: &StreamContext,
+    controls: &Controls,
+    shared: &Shared,
+    stop: &std::sync::atomic::AtomicBool,
+    workers: &[JoinHandle<Result<()>>],
+    fps: u32,
+) -> Result<()> {
+    let mut active: Option<Active> = None;
+    let mut generation = 0;
+    // The last rendered frame looked at, and the one being streamed.
+    let mut seen: Option<Arc<Rendered>> = None;
+    let mut current: Option<Arc<Rendered>> = None;
+    let repeat_after = Duration::from_secs_f64(1.5 / fps as f64);
+    let mut last_send = Instant::now();
+    let mut stats = Stats::default();
+    let mut report = Instant::now();
+    loop {
+        if stopping(stop) {
+            return Ok(());
+        }
+        if workers.iter().any(JoinHandle::is_finished) {
+            anyhow::bail!("a pipeline thread stopped");
+        }
+        let (settings, _) = controls.get();
+        let stale = active
+            .as_ref()
+            .is_none_or(|a| (a.resolution, a.codec) != (settings.resolution, settings.codec));
+        if stale {
+            // The old NVENC session closes before the new one opens.
+            drop(active.take());
+            generation += 1;
+            let started = context.start(generation, settings)?;
+            let mut target = shared.target.lock().unwrap_or_else(|e| e.into_inner());
+            target.layout = Some(started.layout);
+            target.version += 1;
+            drop(target);
+            active = Some(started);
+            current = None;
+        }
+        let active_stream = active.as_mut().expect("started above");
+        let layout = active_stream.layout;
+
+        // Wait for a new rendered frame, at most until a repeat is due.
+        let deadline = last_send + repeat_after;
+        let newest = {
+            let output = shared.output.lock().unwrap_or_else(|e| e.into_inner());
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            let (output, _) = shared
+                .rendered
+                .wait_timeout_while(output, timeout, |output| same_frame(output, &seen))
+                .unwrap_or_else(|e| e.into_inner());
+            output.clone()
+        };
+        let mut fresh = false;
+        if !same_frame(&newest, &seen) {
+            seen = newest.clone();
+            // Frames rendered for an earlier layout are dropped.
+            if let Some(rendered) =
+                newest.filter(|r| (r.width, r.height) == (layout.width, layout.height))
+            {
+                current = Some(rendered);
+                fresh = true;
+            }
+        }
+        if fresh || Instant::now() >= deadline {
+            last_send = Instant::now();
+            if let Some(frame) = &current {
+                // What the frame shows was captured then (repeats included).
+                let captured_us =
+                    unix_us().saturating_sub(frame.captured.elapsed().as_micros() as u64);
+                active_stream
+                    .encoder
+                    .send(
+                        &frame.frame,
+                        frame.meta,
+                        captured_us,
+                        controls.take_keyframe_request(),
+                    )
+                    .context("encoding")?;
+                stats.send += last_send.elapsed();
+                stats.frames += 1;
+                stats.fresh += u64::from(fresh);
+                if fresh {
                     stats
                         .latency
-                        .get((q * stats.latency.len() as f64) as usize)
-                        .map_or("-".to_string(), |ms| format!("{ms:.1}"))
-                };
-                tracing::info!(
-                    sent = stats.frames,
-                    fresh = stats.fresh,
-                    send_ms = format!("{:.2}", per(stats.send, stats.frames)),
-                    capture_to_encoded_p50_ms = quantile(0.5),
-                    capture_to_encoded_p90_ms = quantile(0.9),
-                    "encoder input (last 5 s)"
-                );
-                stats = Stats::default();
-                report = Instant::now();
+                        .push(frame.captured.elapsed().as_secs_f64() * 1e3);
+                }
             }
+        }
+
+        if report.elapsed() >= Duration::from_secs(5) {
+            stats.latency.sort_by(f64::total_cmp);
+            let quantile = |q: f64| {
+                stats
+                    .latency
+                    .get((q * stats.latency.len() as f64) as usize)
+                    .map_or("-".to_string(), |ms| format!("{ms:.1}"))
+            };
+            tracing::info!(
+                sent = stats.frames,
+                fresh = stats.fresh,
+                send_ms = format!("{:.2}", per(stats.send, stats.frames)),
+                capture_to_encoded_p50_ms = quantile(0.5),
+                capture_to_encoded_p90_ms = quantile(0.9),
+                "encoder input (last 5 s)"
+            );
+            stats = Stats::default();
+            report = Instant::now();
         }
     }
 }

@@ -13,7 +13,9 @@
 
 use anyhow::{ensure, Result};
 use cudarc::{
-    driver::{result, CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg},
+    driver::{
+        result, CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
+    },
     nvrtc::Ptx,
 };
 use depth_infer::StereoFields;
@@ -34,6 +36,7 @@ fn cuda(what: &str) -> impl FnOnce(cudarc::driver::DriverError) -> anyhow::Error
 pub struct Gpu {
     context: Arc<CudaContext>,
     warp: CudaFunction,
+    warp_rgba: CudaFunction,
     resize: CudaFunction,
 }
 
@@ -44,8 +47,15 @@ impl Gpu {
             .map_err(cuda("loading the GPU kernels"))?;
         Ok(Arc::new(Self {
             context: context.clone(),
-            warp: module.load_function("warp_nv12").map_err(cuda("warp kernel"))?,
-            resize: module.load_function("resize_bgra").map_err(cuda("resize kernel"))?,
+            warp: module
+                .load_function("warp_nv12")
+                .map_err(cuda("warp kernel"))?,
+            warp_rgba: module
+                .load_function("warp_rgba")
+                .map_err(cuda("warp kernel"))?,
+            resize: module
+                .load_function("resize_bgra")
+                .map_err(cuda("resize kernel"))?,
         }))
     }
 
@@ -58,8 +68,66 @@ impl Gpu {
         self.context.new_stream().map_err(cuda("CUDA stream"))
     }
 
+    /// Like [`Self::warp`], but each eye as an RGBA image (`left`, `right`:
+    /// the picture's size); done when this returns.
+    pub fn warp_eyes(
+        &self,
+        stream: &CudaStream,
+        picture: &GpuImage,
+        fields: &StereoFields,
+        delta_scale: f32,
+        left: &mut GpuImage,
+        right: &mut GpuImage,
+    ) -> Result<()> {
+        let (width, height) = (picture.width, picture.height);
+        ensure!(
+            (left.width, left.height, right.width, right.height) == (width, height, width, height),
+            "eye images must be the picture's size ({width}x{height})"
+        );
+        ensure!(
+            fields.on_gpu(),
+            "the warp kernel needs the fields on the GPU (CUDA or TensorRT)"
+        );
+        let (channels, field_height, field_width) = fields.shape();
+        ensure!(channels == 8, "mlbw fields have 8 channels, got {channels}");
+        let fields_address = fields.data_ptr() as u64;
+        let (width_i, height_i) = (width as i32, height as i32);
+        let (field_width_i, field_height_i) = (field_width as i32, field_height as i32);
+        let shift = delta_scale * (width - 1) as f32 * 0.5;
+        let config = LaunchConfig {
+            grid_dim: (
+                (width as u32).div_ceil(RESIZE_BLOCK.0),
+                (height as u32).div_ceil(RESIZE_BLOCK.1),
+                2,
+            ),
+            block_dim: (RESIZE_BLOCK.0, RESIZE_BLOCK.1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut launch = stream.launch_builder(&self.warp_rgba);
+        launch
+            .arg(&picture.buffer)
+            .arg(&fields_address)
+            .arg(&mut left.buffer)
+            .arg(&mut right.buffer)
+            .arg(&width_i)
+            .arg(&height_i)
+            .arg(&field_width_i)
+            .arg(&field_height_i)
+            .arg(&shift);
+        // SAFETY: the arguments match warp_rgba's parameters; every buffer is
+        // as large as the sizes say, and all stay alive (borrowed) until the
+        // synchronize below.
+        unsafe { launch.launch(config) }.map_err(cuda("warp kernel launch"))?;
+        stream.synchronize().map_err(cuda("warp kernel"))
+    }
+
     /// Scales `source` into `target` (any sizes); done when this returns.
-    pub fn resize(&self, stream: &CudaStream, source: &GpuImage, target: &mut GpuImage) -> Result<()> {
+    pub fn resize(
+        &self,
+        stream: &CudaStream,
+        source: &GpuImage,
+        target: &mut GpuImage,
+    ) -> Result<()> {
         let (sw, sh) = (source.width as i32, source.height as i32);
         let (dw, dh) = (target.width as i32, target.height as i32);
         let config = LaunchConfig {
@@ -103,7 +171,10 @@ impl Gpu {
             frame.width,
             frame.height
         );
-        ensure!(fields.on_gpu(), "the warp kernel needs the fields on the GPU (CUDA or TensorRT)");
+        ensure!(
+            fields.on_gpu(),
+            "the warp kernel needs the fields on the GPU (CUDA or TensorRT)"
+        );
         let (channels, field_height, field_width) = fields.shape();
         ensure!(channels == 8, "mlbw fields have 8 channels, got {channels}");
         let fields_address = fields.data_ptr() as u64;
@@ -182,7 +253,10 @@ impl GpuImage {
 
     /// The picture in host memory.
     pub fn download(&self, stream: &Arc<CudaStream>, bgra: &mut [u8]) -> Result<()> {
-        ensure!(bgra.len() == self.buffer.len(), "download buffer has the wrong size");
+        ensure!(
+            bgra.len() == self.buffer.len(),
+            "download buffer has the wrong size"
+        );
         stream
             .memcpy_dtoh(&self.buffer, bgra)
             .map_err(cuda("downloading a picture"))?;
@@ -192,6 +266,11 @@ impl GpuImage {
     /// The buffer, for a copy into it from elsewhere on the GPU.
     pub fn buffer_mut(&mut self) -> &mut CudaSlice<u8> {
         &mut self.buffer
+    }
+
+    /// The buffer, for a copy out of it elsewhere on the GPU.
+    pub fn buffer(&self) -> &CudaSlice<u8> {
+        &self.buffer
     }
 }
 
@@ -268,7 +347,12 @@ mod tests {
         (0..width * height)
             .flat_map(|i| {
                 let (x, y) = (i % width, i / width);
-                [(x * 7 % 256) as u8, (y * 3 % 256) as u8, ((x / 8 + y / 8) % 2 * 200) as u8, 255]
+                [
+                    (x * 7 % 256) as u8,
+                    (y * 3 % 256) as u8,
+                    ((x / 8 + y / 8) % 2 * 200) as u8,
+                    255,
+                ]
             })
             .collect()
     }
@@ -278,14 +362,19 @@ mod tests {
     /// (ORT_DYLIB_PATH); skipped without them.
     #[test]
     fn warp_matches_the_onnx_warp() {
-        let Some(dir) = std::env::var_os("IVR_STEREO_MODEL_DIR").map(std::path::PathBuf::from) else {
+        let Some(dir) = std::env::var_os("IVR_STEREO_MODEL_DIR").map(std::path::PathBuf::from)
+        else {
             eprintln!("IVR_STEREO_MODEL_DIR not set: skipped");
             return;
         };
         init_runtime(&RuntimeOptions::default()).unwrap();
         let providers = [Provider::Cuda];
-        let mut stereo =
-            StereoEngine::new(&dir.join("iw3_mlbw_l2_d1_770x434_fields.onnx"), &providers, 0).unwrap();
+        let mut stereo = StereoEngine::new(
+            &dir.join("iw3_mlbw_l2_d1_770x434_fields.onnx"),
+            &providers,
+            0,
+        )
+        .unwrap();
         let mut onnx = WarpEngine::new(&dir.join("iw3_warp_770x434.onnx"), &providers, 0).unwrap();
         let (fw, fh) = (stereo.width(), stereo.height());
         // Depth with a near square in the middle (strong edges) over a ramp.
@@ -293,7 +382,11 @@ mod tests {
             .map(|i| {
                 let (x, y) = (i % fw, i / fw);
                 let square = (fw / 3..2 * fw / 3).contains(&x) && (fh / 3..2 * fh / 3).contains(&y);
-                if square { 0.9 } else { y as f32 / fh as f32 * 0.5 }
+                if square {
+                    0.9
+                } else {
+                    y as f32 / fh as f32 * 0.5
+                }
             })
             .collect();
         let fields = stereo.infer_fields(&depth, 3.0, 0.5).unwrap();
@@ -306,21 +399,38 @@ mod tests {
         let mut image = GpuImage::new(&stream, width, height).unwrap();
         image.upload(&stream, &color).unwrap();
         let mut frame = GpuFrame::new(&gpu, width, height * 2).unwrap();
-        gpu.warp(&stream, &image, &fields, 1.0 / (fw / 2 - 1) as f32, &mut frame)
-            .unwrap();
+        gpu.warp(
+            &stream,
+            &image,
+            &fields,
+            1.0 / (fw / 2 - 1) as f32,
+            &mut frame,
+        )
+        .unwrap();
         let mut got = vec![0u8; expected.len()];
         // SAFETY: the frame holds exactly expected.len() bytes.
         unsafe { result::memcpy_dtoh_sync(&mut got, frame.address) }.unwrap();
 
-        let diffs: Vec<u8> = got.iter().zip(&expected).map(|(a, b)| a.abs_diff(*b)).collect();
+        let diffs: Vec<u8> = got
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| a.abs_diff(*b))
+            .collect();
         let mean = diffs.iter().map(|&d| d as f64).sum::<f64>() / diffs.len() as f64;
         let max = *diffs.iter().max().unwrap();
         let off = diffs.iter().filter(|&&d| d > 1).count() as f64 / diffs.len() as f64;
-        eprintln!("kernel vs ONNX warp: mean |diff| {mean:.4}, max {max}, >1 on {:.4} %", off * 100.0);
+        eprintln!(
+            "kernel vs ONNX warp: mean |diff| {mean:.4}, max {max}, >1 on {:.4} %",
+            off * 100.0
+        );
         // Float rounding differs (fused multiply-adds, interpolation order):
         // off by one in places, more only on a handful of edge pixels.
         assert!(mean < 0.05, "mean difference {mean}");
-        assert!(off < 0.001, "{:.4} % of samples differ by more than 1", off * 100.0);
+        assert!(
+            off < 0.001,
+            "{:.4} % of samples differ by more than 1",
+            off * 100.0
+        );
     }
 
     /// The resize kernel against fast_image_resize's bilinear convolution
@@ -343,18 +453,30 @@ mod tests {
             let mut got = vec![0u8; dw * dh * 4];
             target.download(&stream, &mut got).unwrap();
 
-            use fast_image_resize::{images::{Image, ImageRef}, FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+            use fast_image_resize::{
+                images::{Image, ImageRef},
+                FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
+            };
             let mut expected = vec![0u8; dw * dh * 4];
             let src = ImageRef::new(sw as u32, sh as u32, &source, PixelType::U8x4).unwrap();
-            let mut dst = Image::from_slice_u8(dw as u32, dh as u32, &mut expected, PixelType::U8x4).unwrap();
+            let mut dst =
+                Image::from_slice_u8(dw as u32, dh as u32, &mut expected, PixelType::U8x4).unwrap();
             let options = ResizeOptions::new()
                 .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
                 .use_alpha(false);
             Resizer::new().resize(&src, &mut dst, &options).unwrap();
 
-            let colour = |v: &[u8]| v.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect::<Vec<_>>();
+            let colour = |v: &[u8]| {
+                v.chunks_exact(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect::<Vec<_>>()
+            };
             let (got, expected) = (colour(&got), colour(&expected));
-            let mean = got.iter().zip(&expected).map(|(a, b)| a.abs_diff(*b) as f64).sum::<f64>()
+            let mean = got
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| a.abs_diff(*b) as f64)
+                .sum::<f64>()
                 / got.len() as f64;
             eprintln!("resize {sw}x{sh} -> {dw}x{dh}: mean |diff| vs CPU {mean:.3}");
             assert!(mean < 1.0, "mean difference {mean}");

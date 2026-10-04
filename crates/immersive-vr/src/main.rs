@@ -5,21 +5,10 @@
 //! (NVENC, in process, straight from GPU memory) -> WebSocket -> browser,
 //! where WebCodecs decodes and WebXR shows each eye in a stereo layer.
 
-mod audio;
-mod capture;
-mod codec;
-mod encoder;
-mod pipeline;
-mod server;
-mod tls;
-mod gpu;
-mod web;
-
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::Parser;
-use depth_infer::{
-    init_runtime, DepthEngine, EngineConfig, ModelFiles, Provider, RuntimeOptions, StereoEngine,
-};
+use depth_infer::{init_runtime, Provider, RuntimeOptions};
+use immersive_vr::{audio, capture, codec, engines, pipeline, server, tls};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 #[derive(Parser)]
@@ -161,68 +150,15 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     init_runtime(&runtime_options(&args)?)?;
-    let (depth_width, depth_height) = args
-        .depth_size
-        .split_once(['x', 'X'])
-        .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
-        .context("--depth-size must be WxH")?;
-    let mut config =
-        EngineConfig::new(ModelFiles::in_dir(&args.models, depth_width, depth_height)?);
-    config.providers = Provider::parse_list(&args.providers)?;
-    let mut engine = DepthEngine::new(&config)?;
-    engine.warmup(5)?;
-    tracing::info!(provider = %engine.provider(), "depth ready");
-
-    let size = format!("{depth_width}x{depth_height}");
-    let mut stereo = Vec::new();
-    for level in 1..=3 {
-        let path = args
-            .stereo_models
-            .join(format!("iw3_mlbw_l2_d{level}_{size}_fields.onnx"));
-        if !path.is_file() {
-            anyhow::ensure!(
-                level > 1,
-                "iw3 model {} not found: run scripts/export_iw3_stereo.py --size {size} (see README)",
-                path.display()
-            );
-            tracing::warn!(model = %path.display(), "missing; stronger settings use the previous level");
-            break;
-        }
-        let mut engine = StereoEngine::new(&path, &config.providers, config.device_id)?;
-        anyhow::ensure!(
-            (engine.width(), engine.height()) == (depth_width, depth_height),
-            "{} is {}x{}, the depth model {size}",
-            path.display(),
-            engine.width(),
-            engine.height()
-        );
-        // The first runs allocate and autotune (tens of ms): not on a live frame.
-        let flat = vec![0.5; engine.width() * engine.height()];
-        for _ in 0..3 {
-            engine.infer_fields(&flat, args.divergence, args.convergence)?;
-        }
-        stereo.push(engine);
-    }
-    // The CUDA primary context (ONNX Runtime's too): the warp kernel and
-    // NVENC work on the fields and frames in place.
-    let cuda = cudarc::driver::CudaContext::new(config.device_id as usize)
-        .map_err(|error| anyhow::anyhow!("CUDA device {}: {error:?}", config.device_id))?;
-    let gpu = gpu::Gpu::new(&cuda)?;
-    let delta_scale = 1.0 / (depth_width / 2 - 1) as f32;
-    {
-        // Check the fields are where the warp kernel reads them, and run it once.
-        let fields = stereo[0].infer_fields(&vec![0.5; depth_width * depth_height], 3.0, 0.5)?;
-        anyhow::ensure!(
-            fields.on_gpu(),
-            "the stereo model runs on {}; the warp needs it on CUDA or TensorRT",
-            stereo[0].provider()
-        );
-        let stream = gpu.stream()?;
-        let picture = gpu::GpuImage::new(&stream, 1920, 1080)?;
-        let mut frame = gpu::GpuFrame::new(&gpu, 1920, 2160)?;
-        gpu.warp(&stream, &picture, &fields, delta_scale, &mut frame)?;
-    }
-    tracing::info!(levels = stereo.len(), provider = %stereo[0].provider(), "iw3 mlbw_l2 ready");
+    let engines = engines::load(&engines::EngineOptions {
+        models: args.models.clone(),
+        stereo_models: args.stereo_models.clone(),
+        depth_size: engines::parse_size(&args.depth_size)?,
+        providers: Provider::parse_list(&args.providers)?,
+        divergence: args.divergence,
+        convergence: args.convergence,
+    })?;
+    let gpu = engines.gpu.clone();
 
     let controls = Arc::new(pipeline::Controls::new(pipeline::Settings {
         divergence: args.divergence,
@@ -251,20 +187,24 @@ fn main() -> Result<()> {
         .transpose()?;
     let pipeline = pipeline::Pipeline {
         capture_size: capture.size,
-        encoder: pipeline::EncoderDefaults {
-            fps: args.fps,
-            bitrate_mbps: args.bitrate,
-            preset: args.preset,
+        output: pipeline::Output::Stream {
+            encoder: pipeline::EncoderDefaults {
+                fps: args.fps,
+                bitrate_mbps: args.bitrate,
+                preset: args.preset,
+            },
+            chunks: chunks.clone(),
+            stream,
         },
-        engine,
-        stereo,
-        gpu,
-        delta_scale,
+        fps: args.fps,
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        engine: engines.depth,
+        stereo: engines.stereo,
+        gpu: engines.gpu,
+        delta_scale: engines.delta_scale,
         controls: controls.clone(),
         latest,
         depth_fps: args.depth_fps,
-        chunks: chunks.clone(),
-        stream,
     };
     let worker = std::thread::Builder::new()
         .name("pipeline".into())

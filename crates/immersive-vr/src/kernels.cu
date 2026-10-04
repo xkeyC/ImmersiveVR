@@ -8,11 +8,54 @@
 //
 // warp_nv12: both eyes from a picture and iw3 mlbw_l2 fields, straight to
 // NV12: the warp of scripts/export_iw3_stereo.py (iw3's backward warp, BT.709
-// limited range) in one pass.
+// limited range) in one pass. warp_rgba: the same, as two RGBA images.
 //
 // One thread per 2x2 block of one eye: four luma samples and the block's
 // CbCr pair. Fields are upsampled on the fly (bilinear, align_corners) and
 // each layer samples the picture along its row (bilinear, border clamp).
+
+// One pixel (x, y) of `eye` warped: the eye's fields upsampled (bilinear,
+// align corners) and two samples along the row (bilinear, border clamp),
+// blended; BGR in 0..1.
+__device__ float3 warp_pixel(
+    const unsigned char* __restrict__ color, const float* __restrict__ fields,
+    int width, int height, int fw, int fh, float shift, int eye, int x, int y)
+{
+    const size_t plane = (size_t)fh * fw;
+    const float* f = fields + (size_t)eye * 4 * plane;
+    const float sx = width > 1 ? (float)(fw - 1) / (float)(width - 1) : 0.0f;
+    const float sy = height > 1 ? (float)(fh - 1) / (float)(height - 1) : 0.0f;
+    const float fy = y * sy;
+    const int y0 = (int)fy;
+    const int y1 = min(y0 + 1, fh - 1);
+    const float ay = fy - (float)y0;
+    const float fx = x * sx;
+    const int x0 = (int)fx;
+    const int x1 = min(x0 + 1, fw - 1);
+    const float ax = fx - (float)x0;
+    float field[4];
+    for (int c = 0; c < 4; c++) {
+        const float* p = f + c * plane;
+        const float top = p[y0 * fw + x0] * (1.0f - ax) + p[y0 * fw + x1] * ax;
+        const float bottom = p[y1 * fw + x0] * (1.0f - ax) + p[y1 * fw + x1] * ax;
+        field[c] = top * (1.0f - ay) + bottom * ay;
+    }
+    const unsigned char* row = color + (size_t)y * width * 4;
+    float b = 0.0f, g = 0.0f, r = 0.0f;
+    for (int layer = 0; layer < 2; layer++) {
+        const float ix = fminf(fmaxf((float)x + field[layer] * shift, 0.0f), (float)(width - 1));
+        const int i0 = (int)ix;
+        const int i1 = min(i0 + 1, width - 1);
+        const float t = ix - (float)i0;
+        const unsigned char* a = row + i0 * 4;
+        const unsigned char* c = row + i1 * 4;
+        const float weight = field[2 + layer];
+        b += fminf(fmaxf((a[0] * (1.0f - t) + c[0] * t) / 255.0f, 0.0f), 1.0f) * weight;
+        g += fminf(fmaxf((a[1] * (1.0f - t) + c[1] * t) / 255.0f, 0.0f), 1.0f) * weight;
+        r += fminf(fmaxf((a[2] * (1.0f - t) + c[2] * t) / 255.0f, 0.0f), 1.0f) * weight;
+    }
+    return make_float3(fminf(fmaxf(b, 0.0f), 1.0f), fminf(fmaxf(g, 0.0f), 1.0f), fminf(fmaxf(r, 0.0f), 1.0f));
+}
 
 extern "C" __global__ void warp_nv12(
     const unsigned char* __restrict__ color,  // BGRA, width x height, rows width * 4 bytes apart
@@ -25,54 +68,17 @@ extern "C" __global__ void warp_nv12(
     const int by = blockIdx.y * blockDim.y + threadIdx.y;
     const int eye = blockIdx.z;
     if (bx * 2 >= width || by * 2 >= height) return;
-
-    const size_t plane = (size_t)fh * fw;
-    const float* f = fields + (size_t)eye * 4 * plane;
-    const float sx = width > 1 ? (float)(fw - 1) / (float)(width - 1) : 0.0f;
-    const float sy = height > 1 ? (float)(fh - 1) / (float)(height - 1) : 0.0f;
     float sum_b = 0.0f, sum_g = 0.0f, sum_r = 0.0f;
-
     for (int dy = 0; dy < 2; dy++) {
         const int y = by * 2 + dy;
-        const float fy = y * sy;
-        const int y0 = (int)fy;
-        const int y1 = min(y0 + 1, fh - 1);
-        const float ay = fy - (float)y0;
-        const unsigned char* row = color + (size_t)y * width * 4;
         for (int dx = 0; dx < 2; dx++) {
             const int x = bx * 2 + dx;
-            const float fx = x * sx;
-            const int x0 = (int)fx;
-            const int x1 = min(x0 + 1, fw - 1);
-            const float ax = fx - (float)x0;
-            float field[4];
-            for (int c = 0; c < 4; c++) {
-                const float* p = f + c * plane;
-                const float top = p[y0 * fw + x0] * (1.0f - ax) + p[y0 * fw + x1] * ax;
-                const float bottom = p[y1 * fw + x0] * (1.0f - ax) + p[y1 * fw + x1] * ax;
-                field[c] = top * (1.0f - ay) + bottom * ay;
-            }
-            float b = 0.0f, g = 0.0f, r = 0.0f;
-            for (int layer = 0; layer < 2; layer++) {
-                const float ix = fminf(fmaxf((float)x + field[layer] * shift, 0.0f), (float)(width - 1));
-                const int i0 = (int)ix;
-                const int i1 = min(i0 + 1, width - 1);
-                const float t = ix - (float)i0;
-                const unsigned char* a = row + i0 * 4;
-                const unsigned char* c = row + i1 * 4;
-                const float weight = field[2 + layer];
-                b += fminf(fmaxf((a[0] * (1.0f - t) + c[0] * t) / 255.0f, 0.0f), 1.0f) * weight;
-                g += fminf(fmaxf((a[1] * (1.0f - t) + c[1] * t) / 255.0f, 0.0f), 1.0f) * weight;
-                r += fminf(fmaxf((a[2] * (1.0f - t) + c[2] * t) / 255.0f, 0.0f), 1.0f) * weight;
-            }
-            b = fminf(fmaxf(b, 0.0f), 1.0f);
-            g = fminf(fmaxf(g, 0.0f), 1.0f);
-            r = fminf(fmaxf(r, 0.0f), 1.0f);
-            const float luma = 16.0f + 219.0f * (0.2126f * r + 0.7152f * g + 0.0722f * b);
+            const float3 bgr = warp_pixel(color, fields, width, height, fw, fh, shift, eye, x, y);
+            const float luma = 16.0f + 219.0f * (0.2126f * bgr.z + 0.7152f * bgr.y + 0.0722f * bgr.x);
             nv12[((size_t)eye * height + y) * width + x] = (unsigned char)fminf(fmaxf(luma + 0.5f, 0.0f), 255.0f);
-            sum_b += b;
-            sum_g += g;
-            sum_r += r;
+            sum_b += bgr.x;
+            sum_g += bgr.y;
+            sum_r += bgr.z;
         }
     }
     const float b = sum_b * 0.25f, g = sum_g * 0.25f, r = sum_r * 0.25f;
@@ -81,6 +87,28 @@ extern "C" __global__ void warp_nv12(
     unsigned char* uv = nv12 + (size_t)width * 2 * height + ((size_t)eye * (height / 2) + by) * width + bx * 2;
     uv[0] = (unsigned char)fminf(fmaxf(cb + 0.5f, 0.0f), 255.0f);
     uv[1] = (unsigned char)fminf(fmaxf(cr + 0.5f, 0.0f), 255.0f);
+}
+
+// The same warp, each eye as an RGBA image (for an in-process consumer: the
+// Unity plugin), gamma-encoded as the desktop is. One thread per pixel.
+extern "C" __global__ void warp_rgba(
+    const unsigned char* __restrict__ color,
+    const float* __restrict__ fields,
+    unsigned char* __restrict__ left,          // RGBA, width x height
+    unsigned char* __restrict__ right,
+    int width, int height, int fw, int fh,
+    float shift)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int eye = blockIdx.z;
+    if (x >= width || y >= height) return;
+    const float3 bgr = warp_pixel(color, fields, width, height, fw, fh, shift, eye, x, y);
+    unsigned char* out = (eye == 0 ? left : right) + ((size_t)y * width + x) * 4;
+    out[0] = (unsigned char)(bgr.z * 255.0f + 0.5f);
+    out[1] = (unsigned char)(bgr.y * 255.0f + 0.5f);
+    out[2] = (unsigned char)(bgr.x * 255.0f + 0.5f);
+    out[3] = 255;
 }
 
 // A tent filter as wide as the scale (bilinear convolution, as
