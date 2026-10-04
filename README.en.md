@@ -83,7 +83,7 @@ You can also install the page as an app from the browser menu and open it from t
   - **3D strength**: how strong the depth effect is. The default is 0.5%; too high becomes uncomfortable.
   - **Convergence**: at 0 the image pops out of the screen; at 1 it recedes into it.
   - **Screen distance / size / curvature / height** shape the virtual screen. **Recenter** moves it in front of you.
-  - **Background opacity** (passthrough): how much of the room shows.
+  - **Background opacity** (passthrough): how much of the room shows. At 100% you see all of it; at 0% the background is fully opaque, so only the virtual screen shows. The slider moves in 5% steps, and clicking just past either end sets 0% or 100%.
   - **Mute PC**: mutes the PC's speakers while streaming, so sound only plays in the headset. It is on by default, and the PC's state is restored when you disconnect or the server stops.
 - The panel's header shows resolution, frame rate, bitrate and latency. "收 / 显" are capture-to-received and capture-to-displayed times, corrected for the clock difference between PC and headset.
 

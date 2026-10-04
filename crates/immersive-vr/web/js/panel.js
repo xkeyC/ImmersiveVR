@@ -87,7 +87,8 @@ function redraw() {
     roundRect(x, y, Math.max(h, w * value), h, h / 2); ctx.fill();
     ctx.fillStyle = "#fff";
     ctx.beginPath(); ctx.arc(x + Math.max(h / 2, w * value - h / 2), y + h / 2, h * 0.6, 0, Math.PI * 2); ctx.fill();
-    buttons.push({ x, y: y - 14, w, h: h + 28, action: `slide:${key}` });
+    // Clickable a little past both ends, so the ends (0 and 100 %) are easy to hit.
+    buttons.push({ x: x - 40, y: y - 14, w: w + 80, h: h + 28, action: `slide:${key}`, track: { x, w } });
   };
 
   text("ImmersiveVR", 48, 56, 44);
@@ -170,7 +171,10 @@ function buttonAt(hit) {
   if (!hit) return null;
   const b = panel.buttons.find((b) => hit.px >= b.x && hit.px <= b.x + b.w && hit.py >= b.y && hit.py <= b.y + b.h);
   if (!b) return "panel";
-  return b.action.startsWith("slide:") ? `${b.action}:${((hit.px - b.x) / b.w).toFixed(3)}` : b.action;
+  if (!b.track) return b.action;
+  // Where along the track, in 5 % steps (so the left end is exactly 0).
+  const along = Math.min(1, Math.max(0, (hit.px - b.track.x) / b.track.w));
+  return `${b.action}:${(Math.round(along * 20) / 20).toFixed(2)}`;
 }
 
 /** Places the panel in front of a viewer (position, yaw), a little below eye level. */
